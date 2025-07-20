@@ -12,9 +12,9 @@ from typing import Dict, List, Optional
 import os
 
 # 导入已有的计算函数
-from PGRWQI.flow_routing_modules.core.geometry import get_river_length, calculate_river_width
-from PGRWQI.flow_routing_modules.physics.environment_param import compute_retainment_factor
-from PGRWQI.data_processing import load_daily_data, load_river_attributes
+from ..core.geometry import get_river_length, calculate_river_width
+from ..physics.environment_param import compute_retainment_factor
+from ...data_processing import load_daily_data, load_river_attributes
 
 
 def calculate_retention_coefficients(
@@ -51,13 +51,29 @@ def calculate_retention_coefficients(
     # 创建NextDownID映射
     topo_dict = attr_df.set_index('COMID')['NextDownID'].to_dict()
     
-    # 创建属性字典（用于获取河段长度）
+    ##打印df中各字段的数据类型，尤其是COMID
+    print("数据类型检查:")
+    print(attr_df.dtypes)
+    ##打印df的前几行
+    print("数据样例:")
+    print(attr_df.head())
+
     attr_dict = {}
     for _, row in attr_df.iterrows():
-        attr_dict[str(row['COMID'])] = {
+        # 确保 COMID 是整数，然后转换为字符串，避免 .0
+        # 如果 row['COMID'] 已经是浮点数但值是整数，可以强制转换为 int
+        comid_int = int(row['COMID'])
+        attr_dict[str(comid_int)] = {
             'lengthkm': row.get('lengthkm', 1.0)
         }
-    
+
+    ##打印attr_dict的前几行
+    print("河段属性字典构建完成")
+    print(f"河段数量: {len(attr_dict)}")
+    ## 打印前5个河段的属性
+    for comid, attrs in list(attr_dict.items())[:5]:
+        print(f"COMID: {comid}, 属性: {attrs}")
+
     # 3. 计算保留系数
     print("计算保留系数...")
     
@@ -66,6 +82,7 @@ def calculate_retention_coefficients(
     
     # 按河段分组处理
     for comid, group in df.groupby('COMID'):
+        print(f"处理河段 {comid}...")
         # 获取下游河段ID
         next_down_id = topo_dict.get(comid, 0)
         
@@ -228,9 +245,9 @@ def analyze_retention_patterns(retention_file: str):
 
 if __name__ == "__main__":
     # 配置参数
-    daily_data_path = "D:\\PGRWQ\\data\\feature_daily_ts.csv"  # 修改为您的数据路径
-    attr_data_path = "D:\\PGRWQ\\data\\river_attributes_new.csv"   # 修改为您的属性数据路径
-    output_path = "retention_coefficients_timeseries.csv"
+    daily_data_path =  'data/feature_daily_ts.csv' # 修改为您的数据路径
+    attr_data_path =   'data/river_attributes_new.csv' # 修改为您的属性数据路径
+    output_path = "output/retention_coefficients_timeseries.csv"
     
     # 计算保留系数
     calculate_retention_coefficients(

@@ -35,6 +35,16 @@ def get_river_length(comid, attr_dict, river_info=None):
     返回:
         float: 河段长度(km)
     """
+    comid = int(comid)
+    # 首先尝试从attr_dict获取长度
+    if comid in attr_dict:
+        # 获取该COMID的所有属性值
+        attrs = attr_dict[comid]
+        
+        # 检查'lengthkm'是否在属性字典中
+        if isinstance(attrs, dict) and 'lengthkm' in attrs:
+            return float(attrs['lengthkm'])
+        
     comid_str = str(comid)
     
     # 首先尝试从attr_dict获取长度

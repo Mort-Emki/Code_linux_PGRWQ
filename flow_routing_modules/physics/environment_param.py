@@ -17,6 +17,7 @@ environment.py - 环境调整因子模块
 import numpy as np
 import pandas as pd
 import logging
+from typing import Optional
 
 
 def compute_temperature_factor(temperature: pd.Series, parameter: str = "TN") -> pd.Series:
@@ -40,8 +41,12 @@ def compute_temperature_factor(temperature: pd.Series, parameter: str = "TN") ->
     else:  # TP
         alpha = 1.06    # TP的α值
     
-    # 计算 α^(t-20)
-    return np.power(alpha, temperature - 20) 
+    # 计算 α^(t-20)，结果是 NumPy 数组
+    temperature_factor_array = np.power(alpha, temperature - 20)
+    
+    # 将 NumPy 数组转换回 Pandas Series，并保留原始 Series 的索引
+    # 这样可以确保返回的 Series 与输入的 temperature Series 具有相同的结构
+    return pd.Series(temperature_factor_array, index=temperature.index)
 
 
 def compute_nitrogen_concentration_factor(N_concentration: pd.Series) -> pd.Series:
@@ -92,8 +97,8 @@ def compute_nitrogen_concentration_factor(N_concentration: pd.Series) -> pd.Seri
 def compute_retainment_factor(v_f: float, Q_up: pd.Series, Q_down: pd.Series, 
                             W_up: pd.Series, W_down: pd.Series,
                             length_up: float, length_down: float,
-                            temperature: pd.Series = None,
-                            N_concentration: pd.Series = None,
+                            temperature: Optional[pd.Series] = None,
+                            N_concentration: Optional[pd.Series] = None,
                             parameter: str = "TN") -> pd.Series:
     """
     计算上下游河段间的物质保留系数
@@ -156,8 +161,13 @@ def compute_retainment_factor(v_f: float, Q_up: pd.Series, Q_down: pd.Series,
     exp_down = (-v_f_adjusted * S_down / (2 * Q_down_adj)).clip(-50, 50)
     
     # 5. 计算保留系数
-    R_up = np.exp(exp_up)
-    R_down = np.exp(exp_down)
+    R_up_array = np.exp(exp_up)
+    R_down_array = np.exp(exp_down)
+
+    # 将 NumPy 数组转换回 Pandas Series，并确保使用相同的索引
+    R_up = pd.Series(R_up_array, index=Q_up.index)
+    R_down = pd.Series(R_down_array, index=Q_down.index)
+    
     R = R_up * R_down
     
     # 6. 填充可能的NaN值

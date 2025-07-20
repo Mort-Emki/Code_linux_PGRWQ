@@ -19,7 +19,7 @@ import time
 import torch
 from tqdm import tqdm
 
-from PGRWQI.flow_routing_modules.core.geometry import calculate_river_width
+from ..core.geometry import calculate_river_width
 
 
 def load_e_values(e_exist_path, iteration, target_col):
