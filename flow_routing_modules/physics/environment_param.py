@@ -147,10 +147,10 @@ def compute_retainment_factor(v_f: float, Q_up: pd.Series, Q_down: pd.Series,
     else:
         v_f_adjusted = v_f_m_per_second
     
-    # 浓度调整（仅适用于TN）
-    if parameter == "TN" and N_concentration is not None:
-        conc_factor = compute_nitrogen_concentration_factor(N_concentration)
-        v_f_adjusted = v_f_adjusted * conc_factor
+    # # 浓度调整（仅适用于TN）
+    # if parameter == "TN" and N_concentration is not None:
+    #     conc_factor = compute_nitrogen_concentration_factor(N_concentration)
+    #     v_f_adjusted = v_f_adjusted * conc_factor
     
     # 3. 计算河段面积
     S_up = W_up * length_up_m
