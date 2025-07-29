@@ -249,6 +249,7 @@ def calculate_retention_coefficients_simplified(
                     with warnings.catch_warnings():
                         warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered in log")
                         
+
                         # 调用保留系数计算函数
                         R_value = compute_retainment_factor(
                             v_f=v_f,
@@ -262,7 +263,6 @@ def calculate_retention_coefficients_simplified(
                             N_concentration=pd.Series([N_concentration_day]) if N_concentration_day is not None else None,
                             parameter=param
                         )
-                    
                     # 处理结果
                     if hasattr(R_value, 'iloc'):
                         R_final = R_value.iloc[0]
