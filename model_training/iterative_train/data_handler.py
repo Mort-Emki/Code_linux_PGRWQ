@@ -10,15 +10,15 @@ data_handler.py - 简化优化版数据处理与标准化模块
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 
 # 导入项目中的函数
-from PGRWQI.data_processing import (
+from ...data_processing import (
     build_sliding_windows_for_subset, 
     standardize_time_series_all, 
     standardize_attributes
 )
-from PGRWQI.model_training.gpu_memory_utils import TimingAndMemoryContext
+from ..gpu_memory_utils import TimingAndMemoryContext
 
 class DataHandler:
     """
@@ -39,28 +39,28 @@ class DataHandler:
             enable_precompute: 是否启用预计算滑动窗口
         """
         # 基础属性
-        self.df = None
-        self.attr_df = None
-        self.input_features = None
-        self.attr_features = None
+        self.df: Optional[pd.DataFrame] = None
+        self.attr_df: Optional[pd.DataFrame] = None
+        self.input_features: Optional[List[str]] = None
+        self.attr_features: Optional[List[str]] = None
         self.initialized = False
         
         # 预计算选项
         self.enable_precompute = enable_precompute
         
         # 预分组数据（核心优化1）
-        self._cached_groups = None
+        self._cached_groups: Optional[Dict[str, pd.DataFrame]] = None
         
         # 预计算的滑动窗口（可选优化）
-        self._cached_windows = {}
+        self._cached_windows: Dict[str, Dict] = {}
         
         # 标准化器（一致性保证）
-        self.ts_scaler = None
-        self.attr_scaler = None
+        self.ts_scaler: Optional[Any] = None
+        self.attr_scaler: Optional[Any] = None
         
         # 预标准化属性（核心优化2）
-        self._raw_attr_dict = None
-        self._standardized_attr_dict = None
+        self._raw_attr_dict: Optional[Dict[str, np.ndarray]] = None
+        self._standardized_attr_dict: Optional[Dict[str, np.ndarray]] = None
         
     def initialize(self, 
                   df: pd.DataFrame, 
@@ -100,33 +100,50 @@ class DataHandler:
             
             self.initialized = True
             logging.info("DataHandler简化初始化完成")
-            logging.info(f"预分组河段数: {len(self._cached_groups)}")
+            logging.info(f"预分组河段数: {len(self._cached_groups) if self._cached_groups else 0}")
             if self.enable_precompute:
                 logging.info(f"预计算窗口河段数: {len(self._cached_windows)}")
     
     def _precompute_groups(self):
         """预分组数据，避免后续重复分组"""
         with TimingAndMemoryContext("预分组数据"):
-            self._cached_groups = {
-                comid: group.sort_values("date").copy().reset_index(drop=True)
-                for comid, group in self.df.groupby("COMID")
-            }
-            logging.info(f"预分组完成：{len(self._cached_groups)} 个河段")
+            if self.df is not None:
+                self._cached_groups = {
+                    str(comid): group.sort_values("date").copy().reset_index(drop=True)
+                    for comid, group in self.df.groupby("COMID")
+                }
+                logging.info(f"预分组完成：{len(self._cached_groups)} 个河段")
+            else:
+                self._cached_groups = {}
+                logging.warning("DataFrame is None, cannot precompute groups")
     
     def _build_attribute_dictionary(self):
         """构建原始属性字典"""
         with TimingAndMemoryContext("构建属性字典"):
             self._raw_attr_dict = {}
-            for row in self.attr_df.itertuples(index=False):
-                comid = str(row.COMID)
-                row_dict = row._asdict()
-                attrs = []
-                for attr in self.attr_features:
-                    if attr in row_dict:
-                        attrs.append(row_dict[attr])
-                    else:
-                        attrs.append(0.0)
-                self._raw_attr_dict[comid] = np.array(attrs, dtype=np.float32)
+            if self.attr_df is not None and self.attr_features is not None:
+                # 使用基于索引的方法，避免_asdict()的类型问题
+                for _, row in self.attr_df.iterrows():
+                    comid: str = str(row['COMID'])
+                    attrs = []
+                    for attr in self.attr_features:
+                        if attr in row:
+                            value = row[attr]
+                            # 确保值是数值类型
+                            if pd.isna(value):
+                                attrs.append(0.0)
+                            elif isinstance(value, (int, float)):
+                                attrs.append(float(value))
+                            else:
+                                try:
+                                    attrs.append(float(value))
+                                except (ValueError, TypeError):
+                                    attrs.append(0.0)
+                        else:
+                            attrs.append(0.0)
+                    self._raw_attr_dict[comid] = np.array(attrs, dtype=np.float32)
+            else:
+                logging.warning("Cannot build attribute dictionary: attr_df or attr_features is None")
             
             logging.info(f"属性字典构建完成：{len(self._raw_attr_dict)} 个河段")
     
@@ -151,41 +168,49 @@ class DataHandler:
             
         with TimingAndMemoryContext("预标准化属性"):
             # 标准化所有属性
-            attr_matrix = np.vstack([self._raw_attr_dict[k] for k in self._raw_attr_dict.keys()])
-            attr_matrix_scaled = self.attr_scaler.transform(attr_matrix)
-            self._standardized_attr_dict = {
-                k: attr_matrix_scaled[i] 
-                for i, k in enumerate(self._raw_attr_dict.keys())
-            }
-            logging.info("属性预标准化完成")
+            if self._raw_attr_dict and self.attr_scaler is not None:
+                attr_matrix = np.vstack([self._raw_attr_dict[k] for k in self._raw_attr_dict.keys()])
+                attr_matrix_scaled = self.attr_scaler.transform(attr_matrix)
+                self._standardized_attr_dict = {
+                    k: attr_matrix_scaled[i] 
+                    for i, k in enumerate(self._raw_attr_dict.keys())
+                }
+                logging.info("属性预标准化完成")
+            else:
+                self._standardized_attr_dict = {}
+                logging.warning("Cannot precompute standardized attributes: missing data or scaler")
     
     def _precompute_sliding_windows(self, time_window=10):
         """预计算滑动窗口（顺序处理，内存换时间）"""
         with TimingAndMemoryContext("预计算滑动窗口"):
-            for comid, group in self._cached_groups.items():
-                input_data = group[self.input_features].values
-                windows = []
-                dates = []
-                
-                for i in range(len(input_data) - time_window + 1):
-                    window = input_data[i:i + time_window]
-                    if not np.isnan(window).any():
-                        windows.append(window)
-                        dates.append(group['date'].iloc[i + time_window - 1])
-                
-                if windows:
-                    X = np.array(windows, dtype=np.float32)
-                    # 立即标准化
-                    N, T, D = X.shape
-                    X_2d = X.reshape(-1, D)
-                    X_scaled_2d = self.ts_scaler.transform(X_2d)
-                    X_scaled = X_scaled_2d.reshape(N, T, D)
+            if self._cached_groups is not None and self.input_features is not None and self.ts_scaler is not None:
+                for comid, group in self._cached_groups.items():
+                    input_data = group[self.input_features].values
+                    windows = []
+                    dates = []
                     
-                    self._cached_windows[comid] = {
-                        'X': X,
-                        'X_scaled': X_scaled,
-                        'dates': dates
-                    }
+                    for i in range(len(input_data) - time_window + 1):
+                        window = input_data[i:i + time_window]
+                        if not pd.isna(window).any():
+                            windows.append(window)
+                            dates.append(group['date'].iloc[i + time_window - 1])
+                
+                    if windows:
+                        X = np.array(windows, dtype=np.float32)
+                        # 立即标准化
+                        if self.ts_scaler is not None:
+                            N, T, D = X.shape
+                            X_2d = X.reshape(-1, D)
+                            X_scaled_2d = self.ts_scaler.transform(X_2d)
+                            X_scaled = X_scaled_2d.reshape(N, T, D)
+                        else:
+                            X_scaled = X
+                        
+                        self._cached_windows[comid] = {
+                            'X': X,
+                            'X_scaled': X_scaled,
+                            'dates': dates
+                        }
             
             logging.info(f"预计算滑动窗口完成：{len(self._cached_windows)} 个河段")
     
@@ -232,15 +257,17 @@ class DataHandler:
         logging.info(f"样本数据创建完成: X_sample.shape={X_sample.shape}")
         return X_sample, attr_dict_sample
     
-    def get_groups(self, comid_list=None):
+    def get_groups(self, comid_list: Optional[List[str]] = None) -> Optional[Dict[str, pd.DataFrame]]:
         """获取预分组数据"""
+        if self._cached_groups is None:
+            return None
         if comid_list is None:
             return self._cached_groups
         else:
             return {
-                comid: self._cached_groups[comid] 
+                str(comid): self._cached_groups[str(comid)] 
                 for comid in comid_list 
-                if comid in self._cached_groups
+                if str(comid) in self._cached_groups
             }
     
     def get_standardized_data(self, 
@@ -283,13 +310,16 @@ class DataHandler:
                 dates = windows_data['dates']
                 
                 # 获取对应的目标值
-                group = self._cached_groups[comid]
+                if self._cached_groups is not None and comid in self._cached_groups:
+                    group = self._cached_groups[comid]
+                else:
+                    continue
                 for i, date in enumerate(dates):
                     # 查找对应日期的目标值
                     target_row = group[group['date'] == date]
                     if not target_row.empty:
                         y_value = target_row[target_col].iloc[0]
-                        if skip_missing_targets and np.isnan(y_value):
+                        if skip_missing_targets and pd.isna(y_value):
                             continue
                         X_list.append(X_scaled[i])
                         Y_list.append(y_value)
@@ -305,10 +335,13 @@ class DataHandler:
             Dates = np.array(date_track)
             
             # 获取标准化属性字典
-            attr_dict_scaled = {
-                k: v for k, v in self._standardized_attr_dict.items() 
-                if k in [str(c) for c in comid_list]
-            }
+            if self._standardized_attr_dict is not None:
+                attr_dict_scaled = {
+                    k: v for k, v in self._standardized_attr_dict.items() 
+                    if k in [str(c) for c in comid_list]
+                }
+            else:
+                attr_dict_scaled = {}
             
             return X_ts_scaled, attr_dict_scaled, Y, COMIDs, Dates
     
@@ -316,11 +349,14 @@ class DataHandler:
         """实时计算数据（使用预分组数据优化）"""
         with TimingAndMemoryContext("实时构建数据"):
             # 使用预分组的数据，避免重新分组
-            subset_df = pd.concat([
-                self._cached_groups[comid].assign(COMID=comid) 
-                for comid in comid_list 
-                if comid in self._cached_groups
-            ], ignore_index=True)
+            if self._cached_groups is not None:
+                subset_df = pd.concat([
+                    self._cached_groups[str(comid)].assign(COMID=comid) 
+                    for comid in comid_list 
+                    if str(comid) in self._cached_groups
+                ], ignore_index=True)
+            else:
+                return None, None, None, None, None
             
             # 构建滑动窗口
             X_ts, Y, COMIDs, Dates = build_sliding_windows_for_subset(
@@ -337,17 +373,26 @@ class DataHandler:
                 return None, None, None, None, None
             
             # 标准化时间序列数据
-            N, T, input_dim = X_ts.shape
-            X_ts_2d = X_ts.reshape(-1, input_dim)
-            X_ts_scaled_2d = self.ts_scaler.transform(X_ts_2d)
-            X_ts_scaled = X_ts_scaled_2d.reshape(N, T, input_dim)
+            if self.ts_scaler is not None:
+                N, T, input_dim = X_ts.shape
+                X_ts_2d = X_ts.reshape(-1, input_dim)
+                X_ts_scaled_2d = self.ts_scaler.transform(X_ts_2d)
+                X_ts_scaled = X_ts_scaled_2d.reshape(N, T, input_dim)
+            else:
+                X_ts_scaled = X_ts
             
             # 获取标准化的属性字典
-            comid_strs = [str(comid) for comid in COMIDs]
-            attr_dict_scaled = {
-                k: v for k, v in self._standardized_attr_dict.items() 
-                if k in set(comid_strs)
-            }
+            if COMIDs is not None:
+                comid_strs = [str(comid) for comid in COMIDs]
+                if self._standardized_attr_dict is not None:
+                    attr_dict_scaled = {
+                        k: v for k, v in self._standardized_attr_dict.items() 
+                        if k in set(comid_strs)
+                    }
+                else:
+                    attr_dict_scaled = {}
+            else:
+                attr_dict_scaled = {}
             
             return X_ts_scaled, attr_dict_scaled, Y, COMIDs, Dates
     
@@ -355,7 +400,10 @@ class DataHandler:
         """获取标准化的完整属性字典"""
         if not self.initialized:
             raise ValueError("数据处理器尚未初始化")
-        return self._standardized_attr_dict.copy()
+        if self._standardized_attr_dict is not None:
+            return self._standardized_attr_dict.copy()
+        else:
+            return {}
     
     def prepare_training_data_for_head_segments(self,
                                               comid_wq_list: List,
@@ -371,10 +419,13 @@ class DataHandler:
         # 筛选头部河段
         with TimingAndMemoryContext("寻找头部站点"):
             # 从预分组数据中筛选，避免重新分组
-            available_comids = set(self._cached_groups.keys())
-            comid_list_head = list(
-                available_comids & set(comid_wq_list) & set(comid_era5_list)
-            )
+            if self._cached_groups is not None:
+                available_comids = set(self._cached_groups.keys())
+                comid_list_head = list(
+                    available_comids & set([str(c) for c in comid_wq_list]) & set([str(c) for c in comid_era5_list])
+                )
+            else:
+                comid_list_head = []
             
             # 保存头部河段COMID列表
             np.save(f"{output_dir}/comid_list_head_{model_version}.npy", comid_list_head)
@@ -413,7 +464,7 @@ class DataHandler:
     def prepare_batch_prediction_data(self, 
                                      comid_batch: List, 
                                      all_target_cols: List[str],
-                                     target_col: str) -> Dict:
+                                     target_col: str) -> Optional[Dict[str, Any]]:
         """
         优化版的批量预测数据准备
         
@@ -429,7 +480,7 @@ class DataHandler:
         else:
             return self._prepare_batch_realtime(comid_batch, all_target_cols, target_col)
     
-    def _prepare_batch_from_cache(self, comid_batch):
+    def _prepare_batch_from_cache(self, comid_batch) -> Optional[Dict[str, Any]]:
         """从预计算缓存准备批量数据（快速路径）"""
         with TimingAndMemoryContext("从缓存准备批量数据"):
             X_ts_list = []
@@ -459,8 +510,11 @@ class DataHandler:
             X_ts_batch = np.vstack(X_ts_list)
             
             # 准备属性数据
-            attr_dim = next(iter(self._standardized_attr_dict.values())).shape[0]
-            X_attr_batch = np.zeros((X_ts_batch.shape[0], attr_dim), dtype=np.float32)
+            if self._standardized_attr_dict:
+                attr_dim = next(iter(self._standardized_attr_dict.values())).shape[0]
+                X_attr_batch = np.zeros((X_ts_batch.shape[0], attr_dim), dtype=np.float32)
+            else:
+                return None
             
             # 为每个样本分配正确的属性向量
             sample_idx = 0
@@ -468,10 +522,13 @@ class DataHandler:
                 start_idx, end_idx, _, _ = comid_indices[comid]
                 batch_size = end_idx - start_idx
                 
-                attr_vec = self._standardized_attr_dict.get(
-                    str(comid), 
-                    np.zeros(attr_dim, dtype=np.float32)
-                )
+                if self._standardized_attr_dict is not None:
+                    attr_vec = self._standardized_attr_dict.get(
+                        str(comid), 
+                        np.zeros(attr_dim, dtype=np.float32)
+                    )
+                else:
+                    attr_vec = np.zeros(attr_dim, dtype=np.float32)
                 X_attr_batch[sample_idx:sample_idx + batch_size] = attr_vec
                 sample_idx += batch_size
             
@@ -483,7 +540,7 @@ class DataHandler:
                 'groups': {}  # 不再需要groups
             }
     
-    def _prepare_batch_realtime(self, comid_batch, all_target_cols, target_col):
+    def _prepare_batch_realtime(self, comid_batch, all_target_cols, target_col) -> Optional[Dict[str, Any]]:
         """实时准备批量数据（使用预分组数据优化）"""
         with TimingAndMemoryContext("实时准备批量数据"):
             # 使用预分组的数据，避免重新分组
@@ -502,24 +559,27 @@ class DataHandler:
             
             # 为每个COMID准备滑动窗口数据
             for comid in comid_batch:
-                if comid not in filtered_groups:
+                if filtered_groups is None or str(comid) not in filtered_groups:
                     continue
                     
-                group = filtered_groups[comid]
+                group = filtered_groups[str(comid)]
                 
                 # 从预分组数据创建临时DataFrame
                 temp_df = group.copy()
                 temp_df['COMID'] = comid  # 确保COMID列存在
                 
-                X_ts_local, _, _, dates_local = build_sliding_windows_for_subset(
-                    df=temp_df, 
-                    comid_list=[comid], 
-                    input_cols=self.input_features, 
-                    all_target_cols=all_target_cols, 
-                    target_col=target_col,
-                    time_window=10,
-                    skip_missing_targets=False
-                )
+                if self.input_features is not None:
+                    X_ts_local, _, _, dates_local = build_sliding_windows_for_subset(
+                        df=temp_df, 
+                        comid_list=[str(comid)], 
+                        input_cols=self.input_features, 
+                        all_target_cols=all_target_cols, 
+                        target_col=target_col,
+                        time_window=10,
+                        skip_missing_targets=False
+                    )
+                else:
+                    X_ts_local, dates_local = None, []
                 
                 if X_ts_local is None or X_ts_local.shape[0] == 0:
                     continue
@@ -541,22 +601,29 @@ class DataHandler:
             
             # 堆叠并标准化X_ts数据
             X_ts_batch = np.vstack(all_data['X_ts_list'])
-            N, T, input_dim = X_ts_batch.shape
-            X_ts_2d = X_ts_batch.reshape(-1, input_dim)
-            X_ts_scaled_2d = self.ts_scaler.transform(X_ts_2d)
-            X_ts_scaled = X_ts_scaled_2d.reshape(N, T, input_dim)
+            if self.ts_scaler is not None:
+                N, T, input_dim = X_ts_batch.shape
+                X_ts_2d = X_ts_batch.reshape(-1, input_dim)
+                X_ts_scaled_2d = self.ts_scaler.transform(X_ts_2d)
+                X_ts_scaled = X_ts_scaled_2d.reshape(N, T, input_dim)
+            else:
+                X_ts_scaled = X_ts_batch
             
             # 准备属性数据（使用预标准化的数据）
-            attr_dim = next(iter(self._standardized_attr_dict.values())).shape[0]
-            X_attr_batch = np.zeros((X_ts_scaled.shape[0], attr_dim), dtype=np.float32)
+            if self._standardized_attr_dict:
+                attr_dim = next(iter(self._standardized_attr_dict.values())).shape[0]
+                X_attr_batch = np.zeros((X_ts_scaled.shape[0], attr_dim), dtype=np.float32)
+            else:
+                return None
             
             for i, comid in enumerate(all_data['comids']):
                 comid_str = str(comid)
-                attr_vec = self._standardized_attr_dict.get(
-                    comid_str, 
-                    np.zeros(attr_dim, dtype=np.float32)
-                )
-                X_attr_batch[i] = attr_vec
+                if self._standardized_attr_dict is not None:
+                    attr_vec = self._standardized_attr_dict.get(
+                        comid_str, 
+                        np.zeros(attr_dim, dtype=np.float32)
+                    )
+                    X_attr_batch[i] = attr_vec
             
             return {
                 'X_ts_scaled': X_ts_scaled,
@@ -593,13 +660,19 @@ class DataHandler:
             
             # 使用预分组数据进行合并，避免重新分组
             merged_groups = {}
-            for comid, group in self._cached_groups.items():
-                # 为每个组添加来自df_flow的信息
-                flow_info = df_flow_copy[df_flow_copy['COMID'] == comid][required_cols]
-                if not flow_info.empty:
-                    merged_group = pd.merge(group, flow_info, on=['COMID', 'date'], how='left')
-                    merged_group["E_label"] = merged_group[target_col] - merged_group[col_y_up]
-                    merged_groups[comid] = merged_group
+            if self._cached_groups is not None:
+                for comid, group in self._cached_groups.items():
+                    # 为每个组添加来自df_flow的信息
+                    try:
+                        comid_int = int(comid)
+                        flow_info = df_flow_copy[df_flow_copy['COMID'] == comid_int][required_cols]
+                        if not flow_info.empty:
+                            merged_group = pd.merge(group, flow_info, on=['COMID', 'date'], how='left')
+                            merged_group["E_label"] = merged_group[target_col] - merged_group[col_y_up]
+                            merged_groups[comid] = merged_group
+                    except (ValueError, TypeError):
+                        logging.warning(f"Invalid COMID format: {comid}")
+                        continue
             
             # 构建数据
             comid_list = list(merged_groups.keys())
@@ -611,41 +684,52 @@ class DataHandler:
             merged_df = pd.concat(merged_groups.values(), ignore_index=True)
             
             # 构建滑动窗口
-            X_ts, _, COMIDs, Dates = build_sliding_windows_for_subset(
-                merged_df,
-                comid_list,
-                input_cols=self.input_features,
-                target_cols=["E_label"],
-                time_window=time_window
-            )
+            if self.input_features is not None:
+                X_ts, _, COMIDs, Dates = build_sliding_windows_for_subset(
+                    merged_df,
+                    comid_list,
+                    input_cols=self.input_features,
+                    all_target_cols=["E_label"],
+                    target_col="E_label",
+                    time_window=time_window
+                )
+            else:
+                X_ts, COMIDs, Dates = None, [], []
             
             if X_ts is None:
                 return None, None, None, None, None
             
             # 标准化数据
-            N, T, input_dim = X_ts.shape
-            X_ts_2d = X_ts.reshape(-1, input_dim)
-            X_ts_scaled_2d = self.ts_scaler.transform(X_ts_2d)
-            X_ts_scaled = X_ts_scaled_2d.reshape(N, T, input_dim)
+            if self.ts_scaler is not None and X_ts is not None:
+                N, T, input_dim = X_ts.shape
+                X_ts_2d = X_ts.reshape(-1, input_dim)
+                X_ts_scaled_2d = self.ts_scaler.transform(X_ts_2d)
+                X_ts_scaled = X_ts_scaled_2d.reshape(N, T, input_dim)
+            else:
+                X_ts_scaled = X_ts
             
             # 获取标准化属性字典
-            attr_dict_scaled = self._standardized_attr_dict.copy()
+            if self._standardized_attr_dict is not None:
+                attr_dict_scaled = self._standardized_attr_dict.copy()
+            else:
+                attr_dict_scaled = {}
 
             # 提取E_label值
             Y_label = []
-            for cid, date_val in zip(COMIDs, Dates):
-                if cid in merged_groups:
-                    subset = merged_groups[cid][
-                        (merged_groups[cid]["COMID"] == cid) & 
-                        (merged_groups[cid]["date"] == date_val)
-                    ]
-                    if not subset.empty:
-                        label_val = subset["E_label"].iloc[0]
+            if COMIDs is not None and Dates is not None:
+                for cid, date_val in zip(COMIDs, Dates):
+                    if cid in merged_groups:
+                        subset = merged_groups[cid][
+                            (merged_groups[cid]["COMID"] == cid) & 
+                            (merged_groups[cid]["date"] == date_val)
+                        ]
+                        if not subset.empty:
+                            label_val = subset["E_label"].iloc[0]
+                        else:
+                            label_val = 0.0
                     else:
                         label_val = 0.0
-                else:
-                    label_val = 0.0
-                Y_label.append(label_val)
+                    Y_label.append(label_val)
             
             Y_label = np.array(Y_label, dtype=np.float32)
             

@@ -14,9 +14,9 @@ from typing import Dict, List, Tuple, Optional, Any, Union
 from datetime import datetime
 
 # 导入项目中的函数
-from PGRWQI.flow_routing_modules import flow_routing_calculation
-from PGRWQI.logging_utils import ensure_dir_exists
-from PGRWQI.model_training.gpu_memory_utils import (
+from ...flow_routing_modules import flow_routing_calculation
+from ...logging_utils import ensure_dir_exists
+from ..gpu_memory_utils import (
     log_memory_usage, 
     TimingAndMemoryContext, 
     MemoryTracker,
@@ -37,25 +37,25 @@ from .utils import (
 def iterative_training_procedure(
     df: pd.DataFrame,
     attr_df: pd.DataFrame,
-    input_features: List[str] = None,
-    attr_features: List[str] = None,
-    river_info: pd.DataFrame = None,
+    input_features: Optional[List[str]] = None,
+    attr_features: Optional[List[str]] = None,
+    river_info: Optional[pd.DataFrame] = None,
     all_target_cols: List[str] = ["TN", "TP"],
     target_col: str = "TN",
     max_iterations: int = 10,
     epsilon: float = 0.01,
     model_type: str = 'rf',
-    model_params: Dict[str, Any] = None,
+    model_params: Optional[Dict[str, Any]] = None,
     device: str = 'cuda',
-    comid_wq_list: list = None,
-    comid_era5_list: list = None,
-    input_cols: list = None,
+    comid_wq_list: Optional[List] = None,
+    comid_era5_list: Optional[List] = None,
+    input_cols: Optional[List] = None,
     start_iteration: int = 0,
     model_version: str = "v1",
     flow_results_dir: str = "flow_results",
     model_dir: str = "models",
     reuse_existing_flow_results: bool = True
-) -> Any:
+) -> Optional[Any]:
     """
     PG-RWQ 迭代训练主程序
     
@@ -115,6 +115,20 @@ def iterative_training_procedure(
     
     # 初始化组件
     data_handler = DataHandler()
+    
+    # 确保必要的参数不为None
+    if input_features is None:
+        logging.error("输入特征不能为空")
+        memory_tracker.stop()
+        memory_tracker.report()
+        return None
+        
+    if attr_features is None:
+        logging.error("属性特征不能为空")
+        memory_tracker.stop()
+        memory_tracker.report()
+        return None
+    
     data_handler.initialize(df, attr_df, input_features, attr_features)
     
     model_manager = ModelManager(model_type, device, model_save_dir)
@@ -123,13 +137,22 @@ def iterative_training_procedure(
     
     data_validator = DataValidator()
     
+    # 初始化模型变量
+    model: Optional[Any] = None
+    
     try:
         # ======================================================================
         # 2. 初始模型训练与首次汇流计算
         # ======================================================================
         if start_iteration == 0:
             # 为头部河段准备标准化训练数据
-            X_ts_scaled, attr_dict_scaled, Y_head, COMIDs_head, Dates_head = data_handler.prepare_training_data_for_head_segments(
+            if comid_wq_list is None or comid_era5_list is None:
+                logging.error("水质站点列表和ERA5站点列表不能为空")
+                memory_tracker.stop()
+                memory_tracker.report()
+                return None
+                
+            X_ts_scaled, attr_dict_scaled, Y_head, COMIDs_head, _ = data_handler.prepare_training_data_for_head_segments(
                 comid_wq_list=comid_wq_list,
                 comid_era5_list=comid_era5_list,
                 all_target_cols=all_target_cols,
@@ -145,12 +168,20 @@ def iterative_training_procedure(
                 return None
             
             # 确定数据维度，更新模型参数
-            N, T, input_dim = X_ts_scaled.shape
-            attr_dim = next(iter(attr_dict_scaled.values())).shape[0]
+            _, _, input_dim = X_ts_scaled.shape
+            if attr_dict_scaled:
+                attr_dim = next(iter(attr_dict_scaled.values())).shape[0]
+            else:
+                attr_dim = 0
+                logging.warning("属性字典为空，设置attr_dim为0")
             
             # 获取构建参数和训练参数
-            build_params = model_params.get('build', {}).copy()
-            train_params = model_params.get('train', {}).copy()
+            if model_params is not None:
+                build_params = model_params.get('build', {}).copy()
+                train_params = model_params.get('train', {}).copy()
+            else:
+                build_params = {}
+                train_params = {}
             
             # 添加缺失的维度参数
             if 'input_dim' not in build_params:
@@ -202,35 +233,42 @@ def iterative_training_procedure(
                     attr_dict_all = data_handler.get_standardized_attr_dict()
                     
                     # 初始迭代使用E_save=1来保存E值
-                    df_flow = flow_routing_calculation(
-                        df=df.copy(), 
-                        iteration=0, 
-                        model_func=predictor.predict_batch_comids,
-                        river_info=river_info, 
-                        v_f_TN=35.0,
-                        v_f_TP=44.5,
-                        attr_dict=attr_dict_all,
-                        model=model,
-                        all_target_cols=all_target_cols,
-                        target_col=target_col,
-                        attr_df=attr_df,
-                        E_save=1,  # 保存E值
-                        E_save_path=f"{output_dir}/E_values_{model_version}",
-                        E_exist= 1,
-                        E_exist_path= f"{output_dir}/E_values_{model_version}",
-                        enable_debug= True
-                    )
+                    if river_info is not None:
+                        df_flow = flow_routing_calculation(
+                            df=df.copy(), 
+                            iteration=0, 
+                            model_func=predictor.predict_batch_comids,
+                            river_info=river_info, 
+                            v_f_TN=35.0,
+                            v_f_TP=44.5,
+                            attr_dict=attr_dict_all,
+                            model=model,
+                            all_target_cols=all_target_cols,
+                            target_col=target_col,
+                            attr_df=attr_df,
+                            E_save=1,  # 保存E值
+                            E_save_path=f"{output_dir}/E_values_{model_version}",
+                            E_exist= 1,
+                            E_exist_path= f"{output_dir}/E_values_{model_version}",
+                            enable_debug= True
+                        )
+                    else:
+                        logging.error("河段信息为空，无法进行初始汇流计算")
+                        memory_tracker.stop()
+                        memory_tracker.report()
+                        return None
                     
                     # 汇流计算完成后验证结果
-                    ModelVisualizer.verify_flow_results(
-                        iteration=0,
-                        model_version=model_version,
-                        df_flow=df_flow,
-                        original_df=df,
-                        target_col=target_col,
-                        comid_wq_list=comid_wq_list,
-                        output_dir=flow_results_dir
-                    )
+                    if comid_wq_list is not None and 'df_flow' in locals():
+                        ModelVisualizer.verify_flow_results(
+                            iteration=0,
+                            model_version=model_version,
+                            df_flow=df_flow,
+                            original_df=df,
+                            target_col=target_col,
+                            comid_wq_list=comid_wq_list,
+                            output_dir=flow_results_dir
+                        )
 
                     # 保存汇流计算结果
                     save_flow_results(df_flow, 0, model_version, output_dir)
@@ -242,7 +280,10 @@ def iterative_training_procedure(
             last_iteration = start_iteration - 1
             
             # 获取模型参数
-            build_params = model_params.get('build', {}).copy()
+            if model_params is not None:
+                build_params = model_params.get('build', {}).copy()
+            else:
+                build_params = {}
             
             # 添加缺失的维度参数
             if 'input_dim' not in build_params and input_features:
@@ -300,11 +341,15 @@ def iterative_training_procedure(
                 )
                 
                 # 提取y_true和y_pred进行收敛性检查
-                y_true = merged[target_col].values
-                y_pred = merged[col_y_n].values
+                if target_col in merged.columns and col_y_n in merged.columns:
+                    y_true = np.array(merged[target_col].values)
+                    y_pred = np.array(merged[col_y_n].values)
+                else:
+                    logging.error(f"缺少必要的列用于收敛性检查: {target_col} 或 {col_y_n}")
+                    break
                 
                 # 检查收敛性
-                converged, stats = convergence_checker.check_convergence(y_true, y_pred, it)
+                converged, _ = convergence_checker.check_convergence(y_true, y_pred, it)
                 
                 # 如果已收敛，跳出迭代循环
                 if converged:
@@ -316,7 +361,7 @@ def iterative_training_procedure(
                 # ======================================================================
                 logging.info("准备下一轮迭代的训练数据")
                 # 准备下一轮迭代的训练数据
-                X_ts_iter, attr_dict_iter, Y_label_iter, COMIDs_iter, Dates_iter = data_handler.prepare_next_iteration_data(
+                X_ts_iter, attr_dict_iter, Y_label_iter, COMIDs_iter, _ = data_handler.prepare_next_iteration_data(
                     df_flow=df_flow,
                     target_col=target_col,
                     col_y_n=col_y_n,
@@ -334,6 +379,14 @@ def iterative_training_procedure(
                 # 5. 训练/加载迭代模型
                 # ======================================================================
                 model_path = f"{model_save_dir}/model_A{it+1}_{model_version}.pth"
+                
+                # 确保有build_params和train_params
+                if model_params is not None:
+                    build_params = model_params.get('build', {}).copy()
+                    train_params = model_params.get('train', {}).copy()
+                else:
+                    build_params = {}
+                    train_params = {}
                 
                 # 看是否已有模型
                 if not os.path.exists(model_path):
@@ -377,24 +430,28 @@ def iterative_training_procedure(
                         # 获取标准化后的完整属性字典
                         attr_dict_all = data_handler.get_standardized_attr_dict()
                         
-                        df_flow = flow_routing_calculation(
-                            df=df.copy(), 
-                            iteration=it+1, 
-                            model_func=predictor.predict_batch_comids,
-                            river_info=river_info, 
-                            v_f_TN=35.0,
-                            v_f_TP=44.5,
-                            attr_dict=attr_dict_all,
-                            model=model,
-                            all_target_cols=all_target_cols,
-                            target_col=target_col,
-                            attr_df=attr_df,
-                            E_save=1,  # 保存E值
-                            E_save_path=f"{output_dir}/E_values_{model_version}"
-                        )
+                        if river_info is not None:
+                            df_flow = flow_routing_calculation(
+                                df=df.copy(), 
+                                iteration=it+1, 
+                                model_func=predictor.predict_batch_comids,
+                                river_info=river_info, 
+                                v_f_TN=35.0,
+                                v_f_TP=44.5,
+                                attr_dict=attr_dict_all,
+                                model=model,
+                                all_target_cols=all_target_cols,
+                                target_col=target_col,
+                                attr_df=attr_df,
+                                E_save=1,  # 保存E值
+                                E_save_path=f"{output_dir}/E_values_{model_version}"
+                            )
+                        else:
+                            logging.error("河段信息为空，无法进行汇流计算")
+                            break
                         
                         # 执行新一轮汇流计算后验证结果
-                        if 'df_flow' in locals():  # 确保df_flow已定义
+                        if df_flow is not None and comid_wq_list is not None:  # 确保df_flow已定义
                             ModelVisualizer.verify_flow_results(
                                 iteration=it+1,
                                 model_version=model_version,
@@ -413,7 +470,7 @@ def iterative_training_procedure(
                 # ======================================================================
                 # 检查此轮迭代的汇流计算结果的异常值
                 logging.info(f"检查迭代 {it+1} 的汇流计算结果质量")
-                is_valid_data, abnormal_report = data_validator.check_dataframe_abnormalities(
+                is_valid_data, _ = data_validator.check_dataframe_abnormalities(
                     df_flow, it+1, all_target_cols
                 )
                 
@@ -432,9 +489,13 @@ def iterative_training_procedure(
                     logging.info(f"修复后的结果已保存至 {fixed_path}")
                 
                 # 验证数据一致性
-                is_coherent = data_validator.validate_data_coherence(
-                    df, df_flow, input_features, all_target_cols, it+1
-                )
+                if input_features is not None:
+                    is_coherent = data_validator.validate_data_coherence(
+                        df, df_flow, input_features, all_target_cols, it+1
+                    )
+                else:
+                    is_coherent = True
+                    logging.warning("输入特征为空，跳过数据一致性检查")
                 
                 if not is_coherent:
                     logging.warning(f"数据一致性检查失败，可能会影响迭代 {it+2} 的训练")
@@ -444,18 +505,14 @@ def iterative_training_procedure(
         # ======================================================================
         # 生成内存报告
         memory_tracker.stop()
-        memory_stats = memory_tracker.report()
+        _ = memory_tracker.report()
         
         if device == 'cuda':
             log_memory_usage("[训练完成] ")
         
         # 保存最终模型
-        final_iter = min(it+1, max_iterations)
-        final_model_path = os.path.join(model_save_dir, f"final_model_iteration_{final_iter}_{model_version}.pth")
-        
-        if model is not None:
-            model.save_model(final_model_path)
-            logging.info(f"最终模型已保存至 {final_model_path}")
+        final_iter = min(it+1 if 'it' in locals() else 0, max_iterations)
+        _save_final_model(model, final_iter, model_version, model_save_dir)
         
         return model
         
@@ -471,3 +528,44 @@ def iterative_training_procedure(
         memory_tracker.report()
         
         return None
+
+
+def _save_final_model(
+    model: Optional[Any], 
+    final_iter: int, 
+    model_version: str, 
+    model_save_dir: str
+) -> None:
+    """
+    保存最终模型的内部函数
+    
+    参数:
+        model: 要保存的模型对象
+        final_iter: 最终迭代次数
+        model_version: 模型版本
+        model_save_dir: 模型保存目录
+    """
+    if model is None:
+        logging.warning("模型为空，无法保存最终模型")
+        return
+    
+    if not hasattr(model, 'save_model'):
+        logging.warning(
+            f"模型类型 {type(model).__name__} 没有 save_model 方法，"
+            f"无法保存最终模型"
+        )
+        return
+    
+    try:
+        final_model_path = os.path.join(
+            model_save_dir, 
+            f"final_model_iteration_{final_iter}_{model_version}.pth"
+        )
+        
+        model.save_model(final_model_path)
+        logging.info(f"最终模型已成功保存至: {final_model_path}")
+        
+    except Exception as e:
+        logging.error(
+            f"保存最终模型时发生错误: {str(e)}"
+        )

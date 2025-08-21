@@ -10,13 +10,14 @@ import numpy as np
 import logging
 import time
 from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional, Tuple, Union
 
 # 尝试导入GPU内存监控工具
 try:
-    from PGRWQI.model_training.gpu_memory_utils import log_memory_usage, TimingAndMemoryContext
+    from ..gpu_memory_utils import log_memory_usage, TimingAndMemoryContext
 except ImportError:
     # 创建简单的替代函数，以防模块不可用
-    def log_memory_usage(prefix=""):
+    def log_memory_usage(prefix: str = "") -> None:
         """记录GPU内存使用情况"""
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated() / (1024 * 1024)
@@ -25,10 +26,10 @@ except ImportError:
     
     class TimingAndMemoryContext:
         """用于计时和内存监控的上下文管理器"""
-        def __init__(self, name="操作", log_memory=True):
+        def __init__(self, name: str = "操作", log_memory: bool = True):
             self.name = name
             self.log_memory = log_memory
-            self.start_time = None
+            self.start_time: Optional[float] = None
         
         def __enter__(self):
             self.start_time = time.time()
@@ -37,10 +38,11 @@ except ImportError:
             return self
         
         def __exit__(self, exc_type, exc_val, exc_tb):
-            duration = time.time() - self.start_time
-            if self.log_memory and torch.cuda.is_available():
-                log_memory_usage(f"[{self.name} 结束] ")
-            print(f"[计时] {self.name} 完成耗时 {duration:.2f} 秒")
+            if self.start_time is not None:
+                duration = time.time() - self.start_time
+                if self.log_memory and torch.cuda.is_available():
+                    log_memory_usage(f"[{self.name} 结束] ")
+                print(f"[计时] {self.name} 完成耗时 {duration:.2f} 秒")
 
 class CatchmentModel(ABC):
     """
@@ -66,16 +68,25 @@ class CatchmentModel(ABC):
         self.model_type = model_type
         self.device = device
         self.memory_check_interval = memory_check_interval
-        self.base_model = None
+        self.base_model: Optional[Any] = None
         
         # 记录初始内存状态
         if self.device == 'cuda':
             log_memory_usage("[模型初始化] ")
 
     @abstractmethod
-    def train_model(self, attr_dict, comid_arr_train, X_ts_train, Y_train, 
-                  comid_arr_val=None, X_ts_val=None, Y_val=None, 
-                  epochs=10, lr=1e-3, patience=3, batch_size=32):
+    def train_model(self, 
+                   attr_dict: Dict[str, np.ndarray], 
+                   comid_arr_train: np.ndarray, 
+                   X_ts_train: np.ndarray, 
+                   Y_train: np.ndarray,
+                   comid_arr_val: Optional[np.ndarray] = None, 
+                   X_ts_val: Optional[np.ndarray] = None, 
+                   Y_val: Optional[np.ndarray] = None,
+                   epochs: int = 10, 
+                   lr: float = 1e-3, 
+                   patience: int = 3, 
+                   batch_size: int = 32) -> None:
         """
         训练模型（抽象方法，子类必须实现）
         
@@ -95,7 +106,7 @@ class CatchmentModel(ABC):
         pass
 
     @abstractmethod
-    def predict(self, X_ts, X_attr):
+    def predict(self, X_ts: np.ndarray, X_attr: np.ndarray) -> np.ndarray:
         """
         批量预测（抽象方法，子类必须实现）
         
@@ -108,7 +119,7 @@ class CatchmentModel(ABC):
         """
         pass
 
-    def predict_single_sample(self, X_ts_single, X_attr_single):
+    def predict_single_sample(self, X_ts_single: np.ndarray, X_attr_single: np.ndarray) -> Union[float, np.ndarray]:
         """
         对单个样本预测
         
@@ -123,7 +134,7 @@ class CatchmentModel(ABC):
         return self.predict(X_ts_single[None, :], X_attr_single[None, :])[0]
 
     @abstractmethod
-    def save_model(self, path):
+    def save_model(self, path: str) -> None:
         """
         保存模型（抽象方法，子类必须实现）
         
@@ -133,7 +144,7 @@ class CatchmentModel(ABC):
         pass
 
     @abstractmethod
-    def load_model(self, path):
+    def load_model(self, path: str) -> None:
         """
         加载模型（抽象方法，子类必须实现）
         
@@ -142,7 +153,7 @@ class CatchmentModel(ABC):
         """
         pass
 
-    def get_model_info(self):
+    def get_model_info(self) -> Dict[str, Any]:
         """获取模型基本信息"""
         info = {
             "model_type": self.model_type,
@@ -150,7 +161,7 @@ class CatchmentModel(ABC):
         }
         return info
 
-    def _calculate_safe_batch_size(self, X_ts, X_attr, memory_fraction=0.25):
+    def _calculate_safe_batch_size(self, X_ts: np.ndarray, X_attr: np.ndarray, memory_fraction: float = 0.25) -> int:
         """
         计算安全的批处理大小
         
@@ -190,7 +201,7 @@ class CatchmentModel(ABC):
         return batch_size
     
 
-    def _check_nan_in_input(self, X_ts, X_attr=None):
+    def _check_nan_in_input(self, X_ts: np.ndarray, X_attr: Optional[np.ndarray] = None) -> Tuple[bool, Dict[str, Any]]:
         """
         检查输入数据中是否包含NaN值，但不进行替换
         
@@ -234,6 +245,9 @@ class CatchmentModel(ABC):
             # 在日志中记录NaN信息
             logging.warning(f"时间序列输入包含 {ts_nan_count} 个NaN值 ({nan_info['ts_nan_percent']:.2f}%)")
         
+        # 初始化属性相关的变量
+        attr_nan_count = 0
+        
         # 检查属性数据中的NaN（如果提供）
         if X_attr is not None:
             attr_nan_mask = np.isnan(X_attr)
@@ -256,7 +270,7 @@ class CatchmentModel(ABC):
         # 计算总体NaN统计信息
         if has_nan:
             total_elements = ts_elements + (X_attr.size if X_attr is not None else 0)
-            total_nan_count = ts_nan_count + (attr_nan_count if X_attr is not None else 0)
+            total_nan_count = ts_nan_count + attr_nan_count
             nan_info['total_nan_count'] = int(total_nan_count)
             nan_info['total_nan_percent'] = (total_nan_count / total_elements) * 100
             
@@ -264,7 +278,7 @@ class CatchmentModel(ABC):
         
         return has_nan, nan_info
     
-    def predict_with_input_check(self, X_ts, X_attr=None, deal_nan=False):
+    def predict_with_input_check(self, X_ts: np.ndarray, X_attr: Optional[np.ndarray] = None, deal_nan: bool = False) -> np.ndarray:
         """
         带输入检查的预测函数，包装了子类实现的predict方法
         
@@ -278,7 +292,7 @@ class CatchmentModel(ABC):
         # 检查输入数据是否包含NaN值
         has_nan, nan_info = self._check_nan_in_input(X_ts, X_attr)
         
-        if (has_nan)&(deal_nan):
+        if has_nan and deal_nan:
             # 清理NaN值
             X_ts = np.nan_to_num(X_ts, nan=0.0)
             if X_attr is not None:
@@ -286,5 +300,10 @@ class CatchmentModel(ABC):
             logging.info(f"已清理NaN值，总共 {nan_info['total_nan_count']} 个，占比 {nan_info['total_nan_percent']:.2f}%")
 
         # 预测
-        return self.predict(X_ts, X_attr)
+        if X_attr is not None:
+            return self.predict(X_ts, X_attr)
+        else:
+            # 如果没有属性数据，创建零向量
+            X_attr_dummy = np.zeros((X_ts.shape[0], 1), dtype=np.float32)
+            return self.predict(X_ts, X_attr_dummy)
     

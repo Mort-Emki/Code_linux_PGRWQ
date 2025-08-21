@@ -15,9 +15,9 @@ from typing import Dict, List, Tuple, Optional, Any, Union, Callable
 from datetime import datetime
 
 # 导入项目中的函数
-from PGRWQI.model_training.models.model_factory import create_model
-from PGRWQI.model_training.models.models import CatchmentModel
-from PGRWQI.model_training.gpu_memory_utils import (
+from ..models.model_factory import create_model
+from ..models.models import CatchmentModel
+from ..gpu_memory_utils import (
     log_memory_usage, 
     TimingAndMemoryContext,
     force_cuda_memory_cleanup
@@ -43,7 +43,7 @@ class ModelManager:
         self.model_type = model_type
         self.device = device
         self.model_dir = model_dir
-        self.model = None
+        self.model: Optional[CatchmentModel] = None
         
         # 确保模型保存目录存在
         os.makedirs(model_dir, exist_ok=True)
@@ -54,7 +54,7 @@ class ModelManager:
                             train_params: Dict[str, Any],
                             model_path: str,
                             attr_dict: Optional[Dict[str, np.ndarray]] = None,
-                            train_data: Optional[Tuple] = None) -> CatchmentModel:
+                            train_data: Optional[Tuple] = None) -> Optional[CatchmentModel]:
         """
         创建新模型或加载已有模型
         
@@ -81,14 +81,22 @@ class ModelManager:
                 logging.info(f"成功加载模型: {model_path}")
             elif train_data is not None:
                 # 如果没有预训练模型且提供了训练数据，则训练新模型
-                X_ts_train, comid_arr_train, Y_train, X_ts_val, comid_arr_val, Y_val = train_data
+                if len(train_data) == 6:
+                    X_ts_train, comid_arr_train, Y_train, X_ts_val, comid_arr_val, Y_val = train_data
+                else:
+                    logging.error(f"训练数据格式错误，期望6个元素，得到{len(train_data)}个")
+                    return None
                 
                 with TimingAndMemoryContext("模型训练"):
-                    model.train_model(
-                        attr_dict, comid_arr_train, X_ts_train, Y_train, 
-                        comid_arr_val, X_ts_val, Y_val, 
-                        **train_params
-                    )
+                    if attr_dict is not None:
+                        model.train_model(
+                            attr_dict, comid_arr_train, X_ts_train, Y_train, 
+                            comid_arr_val, X_ts_val, Y_val, 
+                            **train_params
+                        )
+                    else:
+                        logging.error("属性字典为空，无法进行模型训练")
+                        return None
                 
                 # 确保目录存在
                 os.makedirs(os.path.dirname(model_path), exist_ok=True)
@@ -115,6 +123,9 @@ class ModelManager:
         """
         if self.model is None:
             raise ValueError("模型尚未加载或创建")
+            
+        if not hasattr(self.model, 'predict_with_input_check'):
+            raise ValueError("模型缺少predict_with_input_check方法")
             
         with TimingAndMemoryContext("批量预测"):
             # 确保模型在正确的设备上
@@ -161,8 +172,12 @@ class ModelManager:
             batch_X_attr = X_attr[i:end_idx]
             
             try:
-                batch_preds = self.model.predict_with_input_check(batch_X_ts, batch_X_attr)
-                predictions[i:end_idx] = batch_preds
+                if self.model is not None and hasattr(self.model, 'predict_with_input_check'):
+                    batch_preds = self.model.predict_with_input_check(batch_X_ts, batch_X_attr)
+                    predictions[i:end_idx] = batch_preds
+                else:
+                    logging.error("模型无效或缺少预测方法")
+                    predictions[i:end_idx] = 0.0
             except Exception as e:
                 logging.error(f"处理批次 {i}:{end_idx} 失败: {str(e)}")
                 # 对失败的批次填充0
@@ -176,7 +191,7 @@ class ModelManager:
             
     def process_batch_samples_prediction(self, 
                                batch_data: Dict,
-                               results_dict: Dict[int, pd.Series] = None) -> Dict[int, pd.Series]:
+                               results_dict: Optional[Dict[int, pd.Series]] = None) -> Dict[int, pd.Series]:
         """
         处理批量预测结果并转换为适当的格式
         
@@ -193,11 +208,16 @@ class ModelManager:
         if batch_data is None:
             return results_dict
         
-        X_ts = batch_data['X_ts_scaled']
-        X_attr = batch_data['X_attr_batch']
-        valid_comids = batch_data['valid_comids']
-        comid_indices = batch_data['comid_indices']
-        groups = batch_data['groups']
+        # 安全获取批处理数据
+        X_ts = batch_data.get('X_ts_scaled')
+        X_attr = batch_data.get('X_attr_batch')
+        valid_comids = batch_data.get('valid_comids', [])
+        comid_indices = batch_data.get('comid_indices', {})
+        groups = batch_data.get('groups', {})
+        
+        if X_ts is None or X_attr is None:
+            logging.error("批处理数据缺少必要的特征")
+            return results_dict
         
         # 执行批量预测
         try:
@@ -222,9 +242,13 @@ class ModelManager:
                 results_dict[comid] = pd.Series(0.0, index=all_dates)
         
         # 确保所有请求的COMID都有结果
-        for comid in groups.keys():
+        for comid, group_data in groups.items():
             if comid not in results_dict:
-                results_dict[comid] = pd.Series(0.0, index=groups[comid]["date"])
+                if isinstance(group_data, dict) and "date" in group_data:
+                    results_dict[comid] = pd.Series(0.0, index=group_data["date"])
+                else:
+                    # 如果group_data不是期望的格式，创建空序列
+                    results_dict[comid] = pd.Series(0.0)
         
         return results_dict
     
@@ -232,12 +256,12 @@ class ModelManager:
                     model: CatchmentModel,
                     test_data: Tuple,
                     attr_dict: Dict[str, np.ndarray],
-                    comids_to_verify: List[int],
+                    comids_to_verify: List[Union[int, str]],
                     target_col: str = 'TN',
                     output_dir: str = 'model_verification',
-                    date_range: Tuple[str, str] = None,
-                    model_iteration: int = None,
-                    model_version: str = None):
+                    date_range: Optional[Tuple[str, str]] = None,
+                    model_iteration: Optional[int] = None,
+                    model_version: Optional[str] = None) -> None:
         """
         创建模型验证图，对比真实值和预测值
         
@@ -259,8 +283,8 @@ class ModelManager:
         os.makedirs(output_dir, exist_ok=True)
         
         # 解析日期范围
-        start_date = None
-        end_date = None
+        start_date: Optional[pd.Timestamp] = None
+        end_date: Optional[pd.Timestamp] = None
         if date_range:
             start_date = pd.to_datetime(date_range[0])
             end_date = pd.to_datetime(date_range[1])
@@ -276,7 +300,7 @@ class ModelManager:
             date = pd.to_datetime(Dates_test[i])
             
             # 按日期范围筛选
-            if date_range:
+            if date_range and start_date is not None and end_date is not None:
                 if date < start_date or date > end_date:
                     continue
             
@@ -300,7 +324,11 @@ class ModelManager:
             X_ts_comid = X_ts_test[indices]
             
             # 创建属性输入
-            attr_vec = attr_dict.get(str(comid), np.zeros_like(next(iter(attr_dict.values()))))
+            if attr_dict:
+                attr_vec = attr_dict.get(str(comid), np.zeros_like(next(iter(attr_dict.values()))))
+            else:
+                logging.warning(f"属性字典为空，COMID {comid} 使用零向量")
+                attr_vec = np.zeros(1)  # 默认属性维度
             X_attr_comid = np.tile(attr_vec, (len(indices), 1))
             
             # 获取预测结果
@@ -334,7 +362,9 @@ class ModelManager:
             plt.ylabel(f'{target_col} Value')
             
             # 如果指定了日期范围，在标题中包含
-            date_info = f" ({start_date.strftime('%Y-%m-%d')}_to_{end_date.strftime('%Y-%m-%d')})" if date_range else ""
+            date_info = ""
+            if date_range and start_date is not None and end_date is not None:
+                date_info = f" ({start_date.strftime('%Y-%m-%d')}_to_{end_date.strftime('%Y-%m-%d')})"
             plt.title(f'Station {comid} - Model Validation{date_info}')
             
             # 添加图例
@@ -349,7 +379,7 @@ class ModelManager:
             
             # 保存图表
             filename = f'verification_{comid}'
-            if date_range:
+            if date_range and start_date is not None and end_date is not None:
                 # 在文件名中添加日期范围
                 filename += f"_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}"
             
@@ -399,7 +429,11 @@ class ModelManager:
             X_ts_comid = X_ts_test[indices]
             
             # 创建属性输入
-            attr_vec = attr_dict.get(str(comid), np.zeros_like(next(iter(attr_dict.values()))))
+            if attr_dict:
+                attr_vec = attr_dict.get(str(comid), np.zeros_like(next(iter(attr_dict.values()))))
+            else:
+                logging.warning(f"属性字典为空，COMID {comid} 使用零向量")
+                attr_vec = np.zeros(1)
             X_attr_comid = np.tile(attr_vec, (len(indices), 1))
             
             # 获取预测
@@ -435,7 +469,7 @@ class ModelManager:
         title_text = f'Model Validation - All Stations'
         if model_info:
             title_text += f" {model_info}"
-        if start_date and end_date:
+        if start_date is not None and end_date is not None:
             title_text += f" ({start_date.strftime('%Y-%m-%d')}_to_{end_date.strftime('%Y-%m-%d')})"
         plt.title(title_text)
         
@@ -446,7 +480,7 @@ class ModelManager:
         
         # 修改，文件名添加model_info
         filename = f'verification_all_stations{model_info}'
-        if start_date and end_date:
+        if start_date is not None and end_date is not None:
             filename += f"_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}"
         
         plt.savefig(os.path.join(output_dir, f'{filename}.png'), dpi=300)
