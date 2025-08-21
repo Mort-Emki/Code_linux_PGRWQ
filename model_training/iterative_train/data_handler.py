@@ -1,10 +1,9 @@
 """
 data_handler.py - 简化优化版数据处理与标准化模块
 
-简化的优化版本，专注于核心性能优化：
-1. 预分组数据，避免重复分组
-2. 预标准化属性
-3. 可选的预计算滑动窗口（顺序处理）
+支持两种模式：
+1. 传统CSV模式：使用预分组数据优化
+2. 高效二进制模式：使用内存映射的真正随机访问
 """
 
 import numpy as np
@@ -19,6 +18,13 @@ from ...data_processing import (
     standardize_attributes
 )
 from ..gpu_memory_utils import TimingAndMemoryContext
+
+# 导入高效数据加载器（用于二进制模式）
+try:
+    from ...efficient_data_loader import EfficientDataLoader
+except ImportError:
+    EfficientDataLoader = None
+    logging.warning("EfficientDataLoader未找到，只能使用传统CSV模式")
 
 class DataHandler:
     """
@@ -68,41 +74,143 @@ class DataHandler:
                   input_features: List[str],
                   attr_features: List[str]):
         """
-        初始化数据处理器，执行关键预处理
+        初始化数据处理器，自动检测模式并执行对应的预处理
         
         参数:
-            df: 包含时间序列数据的DataFrame
+            df: 包含时间序列数据的DataFrame或特殊标记
             attr_df: 包含属性数据的DataFrame
             input_features: 输入特征列表
             attr_features: 属性特征列表
         """
-        with TimingAndMemoryContext("DataHandler简化初始化"):
-            self.df = df.copy()
-            self.attr_df = attr_df.copy()
-            self.input_features = input_features
-            self.attr_features = attr_features
-            
-            # 步骤1: 预分组数据（避免重复分组）
-            self._precompute_groups()
-            
-            # 步骤2: 构建属性字典
-            self._build_attribute_dictionary()
-            
-            # 步骤3: 初始化标准化器
-            self._initialize_scalers()
-            
-            # 步骤4: 预标准化属性
-            self._precompute_standardized_attributes()
-            
-            # 步骤5: 可选的预计算滑动窗口
-            if self.enable_precompute:
-                self._precompute_sliding_windows()
+        with TimingAndMemoryContext("DataHandler初始化"):
+            # 检测是否使用二进制模式
+            if '_binary_mode' in df.columns and df['_binary_mode'].iloc[0]:
+                self.use_binary_mode = True
+                binary_dir = df['_binary_dir'].iloc[0]
+                self._initialize_binary_mode(binary_dir, attr_df, input_features, attr_features)
+            else:
+                self.use_binary_mode = False
+                self._initialize_csv_mode(df, attr_df, input_features, attr_features)
             
             self.initialized = True
-            logging.info("DataHandler简化初始化完成")
-            logging.info(f"预分组河段数: {len(self._cached_groups) if self._cached_groups else 0}")
-            if self.enable_precompute:
-                logging.info(f"预计算窗口河段数: {len(self._cached_windows)}")
+            mode_str = "高效二进制模式" if self.use_binary_mode else "传统CSV模式"
+            logging.info(f"DataHandler初始化完成 - {mode_str}")
+    
+    def _initialize_binary_mode(self, binary_dir: str, attr_df: pd.DataFrame, 
+                               input_features: List[str], attr_features: List[str]):
+        """初始化二进制模式"""
+        if EfficientDataLoader is None:
+            raise ImportError("EfficientDataLoader不可用，无法使用二进制模式")
+        
+        # 初始化高效加载器
+        self.efficient_loader = EfficientDataLoader(binary_dir)
+        self.attr_df = attr_df.copy()
+        self.input_features = input_features
+        self.attr_features = attr_features
+        
+        # 构建属性字典
+        self._build_attribute_dictionary()
+        
+        # 为二进制模式创建标准化器（使用少量样本数据）
+        self._create_ts_scaler_for_binary_mode()
+        
+        # 预标准化属性
+        self._precompute_standardized_attributes()
+        
+        logging.info(f"二进制模式初始化完成")
+        logging.info(f"  - 数据形状: {self.efficient_loader.get_statistics()['data_shape']}")
+        logging.info(f"  - COMID数量: {self.efficient_loader.get_statistics()['n_comids']:,}")
+    
+    def _initialize_csv_mode(self, df: pd.DataFrame, attr_df: pd.DataFrame,
+                            input_features: List[str], attr_features: List[str]):
+        """初始化传统CSV模式"""
+        self.df = df.copy()
+        self.attr_df = attr_df.copy()
+        self.input_features = input_features
+        self.attr_features = attr_features
+        
+        # 步骤1: 预分组数据（避免重复分组）
+        self._precompute_groups()
+        
+        # 步骤2: 构建属性字典
+        self._build_attribute_dictionary()
+        
+        # 步骤3: 初始化标准化器
+        self._initialize_scalers()
+        
+        # 步骤4: 预标准化属性
+        self._precompute_standardized_attributes()
+        
+        # 步骤5: 可选的预计算滑动窗口
+        if self.enable_precompute:
+            self._precompute_sliding_windows()
+        
+        logging.info(f"CSV模式初始化完成")
+        logging.info(f"  - 预分组河段数: {len(self._cached_groups) if self._cached_groups else 0}")
+        if self.enable_precompute:
+            logging.info(f"  - 预计算窗口河段数: {len(self._cached_windows)}")
+    
+    def _create_ts_scaler_for_binary_mode(self):
+        """为二进制模式创建时间序列标准化器"""
+        # 选择少量COMID作为样本
+        stats = self.efficient_loader.get_statistics()
+        all_comids = list(self.efficient_loader.comid_index.keys())
+        sample_comids = all_comids[:min(50, len(all_comids))]  # 使用前50个COMID作为样本
+        
+        logging.info(f"使用 {len(sample_comids)} 个COMID创建标准化器")
+        
+        # 收集样本数据
+        sample_data_list = []
+        for comid in sample_comids:
+            comid_data = self.efficient_loader.load_comid_data(comid)
+            if len(comid_data) >= 10:  # 确保有足够数据构建滑动窗口
+                # 构建滑动窗口
+                for i in range(len(comid_data) - 10 + 1):
+                    window = comid_data[i:i + 10]
+                    sample_data_list.append(window)
+                    if len(sample_data_list) >= 1000:  # 收集足够样本
+                        break
+            
+            if len(sample_data_list) >= 1000:
+                break
+        
+        if sample_data_list:
+            sample_array = np.array(sample_data_list, dtype=np.float32)
+            _, self.ts_scaler = standardize_time_series_all(sample_array)
+            logging.info(f"标准化器创建完成，使用了 {len(sample_data_list)} 个样本窗口")
+        else:
+            self.ts_scaler = None
+            logging.warning("无法创建时间序列标准化器")
+    
+    def prepare_streaming_training_data(self, 
+                                      comid_list: List[str],
+                                      all_target_cols: List[str],
+                                      target_col: str,
+                                      batch_size: int = 200):
+        """准备流式训练数据迭代器"""
+        
+        if not self.initialized:
+            raise ValueError("数据处理器尚未初始化")
+        
+        if self.use_binary_mode:
+            # 使用高效二进制模式
+            return self.efficient_loader.create_training_data_iterator(
+                comid_list=comid_list,
+                input_cols=self.input_features,
+                target_col=target_col,
+                all_target_cols=all_target_cols,
+                time_window=10,
+                batch_size=batch_size
+            )
+        else:
+            # 使用传统CSV模式的流式训练迭代器
+            return StreamingTrainingIterator(
+                data_handler=self,
+                comid_list=comid_list,
+                all_target_cols=all_target_cols,
+                target_col=target_col,
+                batch_size=batch_size
+            )
     
     def _precompute_groups(self):
         """预分组数据，避免后续重复分组"""
@@ -734,3 +842,65 @@ class DataHandler:
             Y_label = np.array(Y_label, dtype=np.float32)
             
             return X_ts_scaled, attr_dict_scaled, Y_label, COMIDs, Dates
+
+
+class StreamingTrainingIterator:
+    """传统CSV模式的流式训练迭代器"""
+    
+    def __init__(self, data_handler, comid_list: List[str], 
+                 all_target_cols: List[str], target_col: str,
+                 batch_size: int = 200):
+        self.data_handler = data_handler
+        self.comid_list = comid_list.copy()
+        self.all_target_cols = all_target_cols
+        self.target_col = target_col
+        self.batch_size = batch_size
+        
+        # 将COMID分批
+        self.comid_batches = [
+            self.comid_list[i:i + self.batch_size] 
+            for i in range(0, len(self.comid_list), self.batch_size)
+        ]
+    
+    def __iter__(self):
+        """迭代返回训练批次 (X, Y, COMIDs, batch_comids)"""
+        for batch_comids in self.comid_batches:
+            try:
+                # 使用DataHandler的现有方法获取数据
+                result = self.data_handler.get_standardized_data(
+                    comid_list=batch_comids,
+                    all_target_cols=self.all_target_cols,
+                    target_col=self.target_col,
+                    time_window=10,
+                    skip_missing_targets=True
+                )
+                
+                X_ts_scaled, attr_dict_scaled, Y, COMIDs, Dates = result
+                
+                if X_ts_scaled is not None and len(X_ts_scaled) > 0:
+                    # 准备属性数据
+                    if attr_dict_scaled:
+                        attr_dim = next(iter(attr_dict_scaled.values())).shape[0]
+                        X_attr = np.zeros((len(X_ts_scaled), attr_dim), dtype=np.float32)
+                        
+                        for i, comid in enumerate(COMIDs):
+                            comid_str = str(comid)
+                            if comid_str in attr_dict_scaled:
+                                X_attr[i] = attr_dict_scaled[comid_str]
+                    else:
+                        X_attr = np.zeros((len(X_ts_scaled), 1), dtype=np.float32)
+                    
+                    yield X_ts_scaled, X_attr, Y, COMIDs, Dates
+                    
+                    # 立即清理内存
+                    del X_ts_scaled, X_attr, Y, COMIDs, Dates
+                    import gc
+                    gc.collect()
+                
+            except Exception as e:
+                logging.error(f"处理训练批次 {batch_comids} 时出错: {e}")
+                continue
+    
+    def __len__(self):
+        """返回批次数量"""
+        return len(self.comid_batches)

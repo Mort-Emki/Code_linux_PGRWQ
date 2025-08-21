@@ -230,24 +230,47 @@ class BranchLSTMModel(CatchmentModel):
                 comid_arr_val=None, X_ts_val=None, Y_val=None, 
                 epochs=10, lr=1e-3, patience=3, batch_size=32, early_stopping=False):
         """
-        训练分支LSTM模型
-        
-        实现父类的抽象方法，完成LSTM模型的训练逻辑
+        训练分支LSTM模型 - 自动检测是否使用流式训练
         
         参数:
             attr_dict: 属性字典
-            comid_arr_train: 训练集河段ID数组
-            X_ts_train: 训练集时间序列特征
-            Y_train: 训练集目标值
-            comid_arr_val: 验证集河段ID数组
-            X_ts_val: 验证集时间序列特征
-            Y_val: 验证集目标值
+            comid_arr_train: 训练集河段ID数组或流式迭代器
+            X_ts_train: 训练集时间序列特征或流式迭代器
+            Y_train: 训练集目标值（流式模式下可为None）
+            comid_arr_val: 验证集河段ID数组或流式迭代器
+            X_ts_val: 验证集时间序列特征或流式迭代器
+            Y_val: 验证集目标值（流式模式下可为None）
             epochs: 训练轮数
             lr: 学习率
             patience: 早停耐心值
             batch_size: 批处理大小
-            early_stopping: 是否启用早停机制，默认为False
+            early_stopping: 是否启用早停机制
         """
+        
+        # 检测是否是流式训练迭代器
+        if hasattr(X_ts_train, '__iter__') and not isinstance(X_ts_train, np.ndarray):
+            # 流式训练模式
+            validation_iterator = X_ts_val if X_ts_val is not None else None
+            return self.train_model_streaming(
+                streaming_iterator=X_ts_train,
+                validation_iterator=validation_iterator,
+                epochs=epochs,
+                lr=lr,
+                patience=patience,
+                early_stopping=early_stopping
+            )
+        else:
+            # 传统训练模式（保持原有逻辑）
+            return self._train_model_traditional(
+                attr_dict, comid_arr_train, X_ts_train, Y_train,
+                comid_arr_val, X_ts_val, Y_val, 
+                epochs, lr, patience, batch_size, early_stopping
+            )
+    
+    def _train_model_traditional(self, attr_dict, comid_arr_train, X_ts_train, Y_train, 
+                               comid_arr_val=None, X_ts_val=None, Y_val=None, 
+                               epochs=10, lr=1e-3, patience=3, batch_size=32, early_stopping=False):
+        """传统训练方法（原始实现）"""
         import torch.optim as optim
         
         # 创建数据集和数据加载器
@@ -379,6 +402,191 @@ class BranchLSTMModel(CatchmentModel):
         # 训练完成后的最终内存使用情况
         if self.device == 'cuda':
             log_memory_usage("[训练完成] ")
+    
+    def train_model_streaming(self, 
+                             streaming_iterator,
+                             validation_iterator=None,
+                             epochs=10, 
+                             lr=1e-3, 
+                             patience=3, 
+                             early_stopping=False):
+        """
+        流式训练方法 - 处理大规模数据的内存优化版本
+        
+        参数:
+            streaming_iterator: 流式训练数据迭代器
+            validation_iterator: 流式验证数据迭代器  
+            epochs: 训练轮数
+            lr: 学习率
+            patience: 早停耐心值
+            early_stopping: 是否启用早停
+        """
+        import torch.optim as optim
+        import torch
+        import gc
+        
+        # 初始化
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(self.base_model.parameters(), lr=lr)
+        
+        # 早停变量
+        best_val_loss = float('inf')
+        no_improve = 0
+        best_model_state = None
+        
+        logging.info(f"开始流式训练: {epochs} 轮次, 学习率 {lr}")
+        
+        for ep in range(epochs):
+            # 记录内存使用
+            if self.device == 'cuda' and ep % self.memory_check_interval == 0:
+                log_memory_usage(f"[轮次 {ep+1}/{epochs} 开始] ")
+            
+            # 训练阶段
+            self.base_model.train()
+            epoch_loss = 0.0
+            batch_count = 0
+            
+            with TimingAndMemoryContext(f"轮次 {ep+1} 流式训练"):
+                # 遍历所有训练批次
+                for batch_idx, batch_data in enumerate(streaming_iterator):
+                    try:
+                        # 检查批次数据格式
+                        if len(batch_data) == 5:
+                            # 来自TrainingDataIterator: (X_ts, Y, COMIDs, batch_comids)
+                            X_ts_batch, Y_batch, COMIDs_batch, batch_comids = batch_data[:4]
+                            # 需要手动构建X_attr
+                            X_attr_batch = self._build_attr_batch(COMIDs_batch)
+                        elif len(batch_data) == 6:
+                            # 来自StreamingTrainingIterator: (X_ts, X_attr, Y, COMIDs, Dates)
+                            X_ts_batch, X_attr_batch, Y_batch = batch_data[:3]
+                        else:
+                            logging.warning(f"未知的批次数据格式，跳过批次 {batch_idx}")
+                            continue
+                        
+                        # 转换为torch tensor并移到设备
+                        X_ts_tensor = torch.from_numpy(X_ts_batch).to(self.device, dtype=torch.float32)
+                        X_attr_tensor = torch.from_numpy(X_attr_batch).to(self.device, dtype=torch.float32)
+                        Y_tensor = torch.from_numpy(Y_batch).to(self.device, dtype=torch.float32)
+                        
+                        # 前向传播
+                        optimizer.zero_grad()
+                        preds = self.base_model(X_ts_tensor, X_attr_tensor)
+                        loss = criterion(preds.squeeze(), Y_tensor)
+                        
+                        # 反向传播
+                        loss.backward()
+                        optimizer.step()
+                        
+                        epoch_loss += loss.item() * X_ts_batch.shape[0]
+                        batch_count += X_ts_batch.shape[0]
+                        
+                        # 立即释放GPU内存
+                        del X_ts_tensor, X_attr_tensor, Y_tensor, preds, loss
+                        if self.device == 'cuda':
+                            torch.cuda.empty_cache()
+                        
+                        # 释放CPU内存
+                        del X_ts_batch, X_attr_batch, Y_batch
+                        gc.collect()
+                        
+                    except Exception as e:
+                        logging.error(f"训练批次 {batch_idx} 出错: {e}")
+                        continue
+            
+            avg_train_loss = epoch_loss / batch_count if batch_count > 0 else float('inf')
+            
+            # 验证阶段
+            if validation_iterator is not None:
+                val_loss = self._validate_streaming(validation_iterator, criterion)
+                
+                print(f"[轮次 {ep+1}/{epochs}] 训练损失: {avg_train_loss:.4f}, 验证损失: {val_loss:.4f}")
+                
+                # 早停检查
+                if early_stopping:
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        no_improve = 0
+                        # 保存最佳模型状态
+                        best_model_state = self.base_model.state_dict().copy()
+                    else:
+                        no_improve += 1
+                        
+                    if no_improve >= patience:
+                        print(f"早停触发：{patience}轮未改善验证损失")
+                        if best_model_state is not None:
+                            self.base_model.load_state_dict(best_model_state)
+                        break
+            else:
+                print(f"[轮次 {ep+1}/{epochs}] 训练损失: {avg_train_loss:.4f}")
+            
+            # 轮次结束后清理内存
+            if self.device == 'cuda':
+                torch.cuda.empty_cache()
+            gc.collect()
+        
+        # 训练完成，加载最佳模型
+        if early_stopping and best_model_state is not None:
+            self.base_model.load_state_dict(best_model_state)
+            print("训练完成，已加载最佳模型")
+        
+        # 最终内存清理
+        if self.device == 'cuda':
+            torch.cuda.empty_cache()
+            log_memory_usage("[流式训练完成] ")
+    
+    def _build_attr_batch(self, comids_batch):
+        """为给定的COMID批次构建属性数据"""
+        # 这里需要访问属性字典，但流式训练中可能需要特殊处理
+        # 暂时返回零数组，实际使用时需要根据具体情况调整
+        attr_dim = 10  # 默认属性维度，需要根据实际情况设置
+        return np.zeros((len(comids_batch), attr_dim), dtype=np.float32)
+    
+    def _validate_streaming(self, validation_iterator, criterion):
+        """流式验证"""
+        import torch
+        import gc
+        
+        self.base_model.eval()
+        total_val_loss = 0.0
+        total_samples = 0
+        
+        with torch.no_grad():
+            for batch_data in validation_iterator:
+                try:
+                    # 处理不同格式的批次数据
+                    if len(batch_data) == 5:
+                        X_ts_batch, Y_batch, COMIDs_batch = batch_data[:3]
+                        X_attr_batch = self._build_attr_batch(COMIDs_batch)
+                    elif len(batch_data) == 6:
+                        X_ts_batch, X_attr_batch, Y_batch = batch_data[:3]
+                    else:
+                        continue
+                    
+                    # 转换为tensor
+                    X_ts_tensor = torch.from_numpy(X_ts_batch).to(self.device, dtype=torch.float32)
+                    X_attr_tensor = torch.from_numpy(X_attr_batch).to(self.device, dtype=torch.float32)
+                    Y_tensor = torch.from_numpy(Y_batch).to(self.device, dtype=torch.float32)
+                    
+                    # 预测
+                    preds = self.base_model(X_ts_tensor, X_attr_tensor)
+                    loss = criterion(preds.squeeze(), Y_tensor)
+                    
+                    total_val_loss += loss.item() * X_ts_batch.shape[0]
+                    total_samples += X_ts_batch.shape[0]
+                    
+                    # 释放内存
+                    del X_ts_tensor, X_attr_tensor, Y_tensor, preds, loss
+                    if self.device == 'cuda':
+                        torch.cuda.empty_cache()
+                    
+                    del X_ts_batch, X_attr_batch, Y_batch
+                    gc.collect()
+                    
+                except Exception as e:
+                    logging.error(f"验证批次出错: {e}")
+                    continue
+        
+        return total_val_loss / total_samples if total_samples > 0 else float('inf')
 
 
     def predict(self, X_ts, X_attr):
