@@ -1,11 +1,10 @@
-import pandas as pd
 import numpy as np
 from typing import List, Optional
-import numba
 import time
 import logging
 import sys
 from pathlib import Path
+import pandas as pd
 
 # Import our custom tqdm that supports logging
 try:
@@ -595,34 +594,22 @@ def standardize_attributes(attr_dict):
     scaled_attr_dict = {k: attr_matrix_scaled[i] for i, k in enumerate(keys)}
     return scaled_attr_dict, scaler
 
-def load_daily_data(csv_path: str = None, binary_data_dir: str = None) -> pd.DataFrame:
+def load_daily_data(binary_data_dir: str):
     """
-    加载日尺度数据 - 支持高效二进制格式
+    加载日尺度数据 - 仅支持高效二进制格式
     
     参数：
-        csv_path: CSV文件路径（传统模式）
-        binary_data_dir: 预处理的二进制数据目录（高效模式）
+        binary_data_dir: 预处理的二进制数据目录
         
-    注意: csv_path 和 binary_data_dir 二选一
-    
     输出：
-        返回DataFrame或特殊标记（用于流式训练）
+        返回特殊标记DataFrame供EfficientDataLoader使用
     """
-    if binary_data_dir:
-        # 使用高效二进制模式
-        binary_path = Path(binary_data_dir)
-        if not (binary_path / 'metadata.json').exists():
-            raise FileNotFoundError(f"二进制数据目录无效: {binary_data_dir}")
-        # 返回特殊标记DataFrame供后续检测
-        return pd.DataFrame({'_binary_mode': [True], '_binary_dir': [binary_data_dir]})
+    binary_path = Path(binary_data_dir)
+    if not (binary_path / 'metadata.json').exists():
+        raise FileNotFoundError(f"二进制数据目录无效: {binary_data_dir}")
     
-    elif csv_path:
-        # 使用传统模式
-        df = pd.read_csv(csv_path)
-        return df
-    
-    else:
-        raise ValueError("必须指定 csv_path 或 binary_data_dir 之一")
+    # 返回特殊标记DataFrame供后续检测
+    return pd.DataFrame({'_binary_mode': [True], '_binary_dir': [binary_data_dir]})
 
 def load_river_info(csv_path: str) -> pd.DataFrame:
     """

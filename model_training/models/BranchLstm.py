@@ -9,69 +9,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 import logging
-from torch.utils.data import DataLoader, Dataset
 from PGRWQI.model_training.gpu_memory_utils import log_memory_usage, TimingAndMemoryContext 
 from PGRWQI.model_training.models.models import CatchmentModel
-
-# =============================================================================
-# 数据集类
-# =============================================================================
-
-class MultiBranchDataset(Dataset):
-    """
-    多分支LSTM模型的数据集类
-    
-    用于处理时间序列特征+属性特征的混合输入数据
-    """
-    def __init__(self, X_ts, Y, comid_arr, attr_dict):
-        """
-        初始化数据集
-        
-        参数:
-            X_ts: (N, T, input_dim) 时间序列数据
-            Y: (N,) 目标标签
-            comid_arr: (N,) 每个样本对应的河段ID
-            attr_dict: { str(COMID): np.array([...]) } 河段的静态属性向量
-        """
-        self.X_ts = X_ts
-        self.Y = Y
-        self.comids = comid_arr
-        self.attr_dict = attr_dict
-
-    def __len__(self):
-        """返回数据集大小"""
-        return len(self.X_ts)
-
-    def __getitem__(self, idx):
-        """获取单个数据样本"""
-        x_ts = self.X_ts[idx]
-        y_val = self.Y[idx]
-        comid_str = str(self.comids[idx])
-        
-        # 获取属性向量，若不存在则使用零向量
-        if comid_str in self.attr_dict:
-            x_attr = self.attr_dict[comid_str]
-        else:
-            x_attr = np.zeros_like(next(iter(self.attr_dict.values())))
-            
-        return x_ts, x_attr, y_val
-
-# =============================================================================
-# 评估指标
-# =============================================================================
-
-def calculate_nse(preds, targets):
-    """计算纳什效率系数 (Nash–Sutcliffe Efficiency)"""
-    mean_targets = targets.mean()
-    numerator = torch.sum((preds - targets) ** 2)
-    denominator = torch.sum((targets - mean_targets) ** 2)
-    nse = 1 - numerator / denominator
-    return nse
-
-def mean_absolute_percentage_error(y_pred, y_true):
-    """计算平均绝对百分比误差 (MAPE)"""
-    epsilon = 1e-6  # 防止除零错误
-    return torch.mean(torch.abs((y_pred - y_true) / (y_true + epsilon))) * 100
 
 # =============================================================================
 # 网络模型定义
@@ -230,178 +169,35 @@ class BranchLSTMModel(CatchmentModel):
                 comid_arr_val=None, X_ts_val=None, Y_val=None, 
                 epochs=10, lr=1e-3, patience=3, batch_size=32, early_stopping=False):
         """
-        训练分支LSTM模型 - 自动检测是否使用流式训练
+        训练分支LSTM模型 - 仅支持流式训练
         
         参数:
             attr_dict: 属性字典
-            comid_arr_train: 训练集河段ID数组或流式迭代器
-            X_ts_train: 训练集时间序列特征或流式迭代器
-            Y_train: 训练集目标值（流式模式下可为None）
-            comid_arr_val: 验证集河段ID数组或流式迭代器
-            X_ts_val: 验证集时间序列特征或流式迭代器
-            Y_val: 验证集目标值（流式模式下可为None）
+            X_ts_train: 流式训练数据迭代器
+            Y_train: 未使用（流式模式）
+            X_ts_val: 流式验证数据迭代器
+            Y_val: 未使用（流式模式）
             epochs: 训练轮数
             lr: 学习率
             patience: 早停耐心值
-            batch_size: 批处理大小
+            batch_size: 未使用（由迭代器控制）
             early_stopping: 是否启用早停机制
         """
         
-        # 检测是否是流式训练迭代器
-        if hasattr(X_ts_train, '__iter__') and not isinstance(X_ts_train, np.ndarray):
-            # 流式训练模式
-            validation_iterator = X_ts_val if X_ts_val is not None else None
-            return self.train_model_streaming(
-                streaming_iterator=X_ts_train,
-                validation_iterator=validation_iterator,
-                epochs=epochs,
-                lr=lr,
-                patience=patience,
-                early_stopping=early_stopping
-            )
-        else:
-            # 传统训练模式（保持原有逻辑）
-            return self._train_model_traditional(
-                attr_dict, comid_arr_train, X_ts_train, Y_train,
-                comid_arr_val, X_ts_val, Y_val, 
-                epochs, lr, patience, batch_size, early_stopping
-            )
+        # 仅支持流式训练
+        if not hasattr(X_ts_train, '__iter__'):
+            raise ValueError("仅支持流式训练迭代器，请使用DataHandler.prepare_streaming_training_data()创建迭代器")
+        
+        validation_iterator = X_ts_val if X_ts_val is not None else None
+        return self.train_model_streaming(
+            streaming_iterator=X_ts_train,
+            validation_iterator=validation_iterator,
+            epochs=epochs,
+            lr=lr,
+            patience=patience,
+            early_stopping=early_stopping
+        )
     
-    def _train_model_traditional(self, attr_dict, comid_arr_train, X_ts_train, Y_train, 
-                               comid_arr_val=None, X_ts_val=None, Y_val=None, 
-                               epochs=10, lr=1e-3, patience=3, batch_size=32, early_stopping=False):
-        """传统训练方法（原始实现）"""
-        import torch.optim as optim
-        
-        # 创建数据集和数据加载器
-        with TimingAndMemoryContext("创建数据集"):
-            train_dataset = MultiBranchDataset(X_ts_train, Y_train, comid_arr_train, attr_dict)
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-            
-            if X_ts_val is not None and Y_val is not None:
-                val_dataset = MultiBranchDataset(X_ts_val, Y_val, comid_arr_val, attr_dict)
-                val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-            else:
-                val_loader = None
-        
-        # 初始化损失函数和优化器
-        criterion = nn.MSELoss()
-        optimizer = optim.Adam(self.base_model.parameters(), lr=lr)
-        
-        # 初始化早停变量
-        best_val_loss = float('inf')
-        no_improve = 0
-        best_model_state = None
-        
-        # 按轮次进行训练
-        for ep in range(epochs):
-            # 记录轮次开始时的内存使用情况
-            if self.device == 'cuda' and ep % self.memory_check_interval == 0:
-                log_memory_usage(f"[轮次 {ep+1}/{epochs} 开始] ")
-            
-            # 训练阶段
-            with TimingAndMemoryContext(f"轮次 {ep+1} 训练", 
-                                    log_memory=(ep % self.memory_check_interval == 0)):
-                self.base_model.train()
-                total_loss = 0.0
-                
-                for batch_idx, (x_ts_batch, x_attr_batch, y_batch) in enumerate(train_loader):
-                    # 记录首批次和定期的内存使用情况
-                    if self.device == 'cuda' and ep % self.memory_check_interval == 0 and batch_idx == 0:
-                        log_memory_usage(f"[轮次 {ep+1} 首批次] ")
-                    
-                    # 将数据移动到设备
-                    x_ts_batch = x_ts_batch.to(self.device, dtype=torch.float32)
-                    x_attr_batch = x_attr_batch.to(self.device, dtype=torch.float32)
-                    y_batch = y_batch.to(self.device, dtype=torch.float32)
-                    
-                    # 前向传播, 计算损失和反向传播
-                    optimizer.zero_grad()
-                    preds = self.base_model(x_ts_batch, x_attr_batch)
-                    loss = criterion(preds, y_batch)
-                    loss.backward()
-                    optimizer.step()
-                    total_loss += loss.item() * x_ts_batch.size(0)
-                    
-                    # 定期清理GPU缓存
-                    if self.device == 'cuda' and batch_idx % 50 == 0:
-                        torch.cuda.empty_cache()
-                
-                avg_train_loss = total_loss / len(train_loader.dataset)
-
-            # 验证阶段
-            if val_loader is not None:
-                with TimingAndMemoryContext(f"轮次 {ep+1} 验证", 
-                                        log_memory=(ep % self.memory_check_interval == 0)):
-                    self.base_model.eval()
-                    total_val_loss = 0.0
-                    total_val_mape = 0.0
-                    total_val_nse = 0.0
-
-                    with torch.no_grad():
-                        for x_ts_val, x_attr_val, y_val in val_loader:
-                            # 将数据移动到设备
-                            x_ts_val = x_ts_val.to(self.device, dtype=torch.float32)
-                            x_attr_val = x_attr_val.to(self.device, dtype=torch.float32)
-                            y_val = y_val.to(self.device, dtype=torch.float32)
-                            
-                            # 获取预测并计算指标
-                            preds_val = self.base_model(x_ts_val, x_attr_val)
-                            loss_val = criterion(preds_val, y_val)
-                            total_val_loss += loss_val.item() * x_ts_val.size(0)
-                            total_val_mape += mean_absolute_percentage_error(preds_val, y_val) * x_ts_val.size(0)
-                            total_val_nse += calculate_nse(preds_val, y_val) * x_ts_val.size(0)
-
-                    # 计算平均指标
-                    avg_val_loss = total_val_loss / len(val_dataset)
-                    avg_val_mape = total_val_mape / len(val_dataset)
-                    avg_val_nse = total_val_nse / len(val_dataset)
-
-                    # 打印训练和验证指标
-                    print(f"轮次 [{ep+1}/{epochs}]")
-                    print(" 验证  | "
-                        f"训练损失={avg_train_loss:.4f}, "
-                        f"验证损失={avg_val_loss:.4f}, "
-                        f"验证MAPE={avg_val_mape:.4f}, "
-                        f"验证NSE={avg_val_nse:.4f}")
-
-                    # 早停检查 - 仅在启用early_stopping时执行
-                    if early_stopping:
-                        if avg_val_loss < best_val_loss:
-                            best_val_loss = avg_val_loss
-                            no_improve = 0
-                            # 保存最佳模型状态
-                            best_model_state = self.base_model.state_dict().copy()
-                        else:
-                            no_improve += 1
-                        
-                        if no_improve >= patience:
-                            print(f"触发早停! {patience}轮未改善验证损失")
-                            
-                            # 早停前的最终内存检查
-                            if self.device == 'cuda':
-                                log_memory_usage("[早停触发] ")
-                            
-                            # 恢复最佳模型状态
-                            if best_model_state is not None:
-                                self.base_model.load_state_dict(best_model_state)
-                            
-                            break
-            else:
-                print(f"[轮次 {ep+1}/{epochs}] 训练MSE: {avg_train_loss:.4f}")
-            
-            # 清理轮次结束时的内存
-            if self.device == 'cuda':
-                torch.cuda.empty_cache()
-
-        # 如果启用了早停但未触发，仍然加载最佳模型
-        if early_stopping and best_model_state is not None and no_improve < patience:
-            self.base_model.load_state_dict(best_model_state)
-            print(f"训练完成，加载验证损失最低的模型（第 {epochs - no_improve} 轮）")
-
-        # 训练完成后的最终内存使用情况
-        if self.device == 'cuda':
-            log_memory_usage("[训练完成] ")
     
     def train_model_streaming(self, 
                              streaming_iterator,
@@ -450,18 +246,11 @@ class BranchLSTMModel(CatchmentModel):
                 # 遍历所有训练批次
                 for batch_idx, batch_data in enumerate(streaming_iterator):
                     try:
-                        # 检查批次数据格式
-                        if len(batch_data) == 5:
-                            # 来自TrainingDataIterator: (X_ts, Y, COMIDs, batch_comids)
-                            X_ts_batch, Y_batch, COMIDs_batch, batch_comids = batch_data[:4]
-                            # 需要手动构建X_attr
-                            X_attr_batch = self._build_attr_batch(COMIDs_batch)
-                        elif len(batch_data) == 6:
-                            # 来自StreamingTrainingIterator: (X_ts, X_attr, Y, COMIDs, Dates)
-                            X_ts_batch, X_attr_batch, Y_batch = batch_data[:3]
-                        else:
-                            logging.warning(f"未知的批次数据格式，跳过批次 {batch_idx}")
-                            continue
+                        # 流式训练迭代器返回: (X_ts, Y, COMIDs, batch_comids)
+                        X_ts_batch, Y_batch, COMIDs_batch, batch_comids = batch_data
+                        
+                        # 构建属性数据（从属性字典获取）
+                        X_attr_batch = self._get_attr_data_for_batch(COMIDs_batch)
                         
                         # 转换为torch tensor并移到设备
                         X_ts_tensor = torch.from_numpy(X_ts_batch).to(self.device, dtype=torch.float32)
@@ -534,12 +323,30 @@ class BranchLSTMModel(CatchmentModel):
             torch.cuda.empty_cache()
             log_memory_usage("[流式训练完成] ")
     
-    def _build_attr_batch(self, comids_batch):
-        """为给定的COMID批次构建属性数据"""
-        # 这里需要访问属性字典，但流式训练中可能需要特殊处理
-        # 暂时返回零数组，实际使用时需要根据具体情况调整
-        attr_dim = 10  # 默认属性维度，需要根据实际情况设置
-        return np.zeros((len(comids_batch), attr_dim), dtype=np.float32)
+    def _get_attr_data_for_batch(self, comids_batch):
+        """为给定的COMID批次获取属性数据"""
+        # 创建属性数据数组
+        if hasattr(self, '_cached_attr_dict') and self._cached_attr_dict:
+            # 如果有缓存的属性字典，使用它
+            attr_dict = self._cached_attr_dict
+            attr_dim = next(iter(attr_dict.values())).shape[0]
+        else:
+            # 默认属性维度
+            attr_dim = 10
+            attr_dict = {}
+        
+        X_attr_batch = np.zeros((len(comids_batch), attr_dim), dtype=np.float32)
+        
+        for i, comid in enumerate(comids_batch):
+            comid_str = str(comid)
+            if comid_str in attr_dict:
+                X_attr_batch[i] = attr_dict[comid_str]
+        
+        return X_attr_batch
+    
+    def set_attr_dict(self, attr_dict):
+        """设置属性字典（由模型管理器调用）"""
+        self._cached_attr_dict = attr_dict
     
     def _validate_streaming(self, validation_iterator, criterion):
         """流式验证"""
@@ -553,14 +360,11 @@ class BranchLSTMModel(CatchmentModel):
         with torch.no_grad():
             for batch_data in validation_iterator:
                 try:
-                    # 处理不同格式的批次数据
-                    if len(batch_data) == 5:
-                        X_ts_batch, Y_batch, COMIDs_batch = batch_data[:3]
-                        X_attr_batch = self._build_attr_batch(COMIDs_batch)
-                    elif len(batch_data) == 6:
-                        X_ts_batch, X_attr_batch, Y_batch = batch_data[:3]
-                    else:
-                        continue
+                    # 流式验证迭代器返回: (X_ts, Y, COMIDs, batch_comids)
+                    X_ts_batch, Y_batch, COMIDs_batch, batch_comids = batch_data
+                    
+                    # 构建属性数据
+                    X_attr_batch = self._get_attr_data_for_batch(COMIDs_batch)
                     
                     # 转换为tensor
                     X_ts_tensor = torch.from_numpy(X_ts_batch).to(self.device, dtype=torch.float32)
