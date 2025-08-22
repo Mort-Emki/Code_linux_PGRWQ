@@ -31,11 +31,24 @@ def check_existing_flow_routing_results(
         flow_results_dir: 汇流结果保存目录
         
     返回:
-        (exists, file_path): 元组，包含是否存在的布尔值和文件路径
+        (exists, file_path): 元组，包含是否存在的布尔值和CSV文件路径
+        
+    注意:
+        优先检查二进制格式，如果不存在则检查CSV格式
     """
-    file_path = os.path.join(flow_results_dir, f"flow_routing_iteration_{iteration}_{model_version}.csv")
-    exists = os.path.isfile(file_path)
-    return exists, file_path
+    # 检查二进制格式
+    binary_dir = os.path.join(flow_results_dir, f"flow_routing_iteration_{iteration}_{model_version}_binary")
+    binary_metadata = os.path.join(binary_dir, 'metadata.json')
+    
+    if os.path.exists(binary_metadata):
+        # 二进制格式存在，返回对应的CSV路径（保持兼容性）
+        csv_path = os.path.join(flow_results_dir, f"flow_routing_iteration_{iteration}_{model_version}.csv")
+        return True, csv_path
+    
+    # 检查CSV格式
+    csv_path = os.path.join(flow_results_dir, f"flow_routing_iteration_{iteration}_{model_version}.csv")
+    csv_exists = os.path.isfile(csv_path)
+    return csv_exists, csv_path
 
 
 def create_predictor(data_handler, model_manager, all_target_cols, target_col):
@@ -45,21 +58,54 @@ def create_predictor(data_handler, model_manager, all_target_cols, target_col):
 
 def save_flow_results(df_flow, iteration, model_version, output_dir):
     """
-    保存汇流计算结果
+    保存汇流计算结果（CSV + 二进制格式）
     
     参数:
         df_flow: 汇流计算结果DataFrame
         iteration: 迭代次数
         model_version: 模型版本号
         output_dir: 输出目录
+        
+    返回:
+        binary_dir: 二进制数据目录路径
     """
     # 确保目录存在
     ensure_dir_exists(output_dir)
     
-    # 保存结果
-    result_path = os.path.join(output_dir, f"flow_routing_iteration_{iteration}_{model_version}.csv")
-    df_flow.to_csv(result_path, index=False)
-    logging.info(f"迭代 {iteration} 汇流计算结果已保存至 {result_path}")
+    # 保存CSV格式（保持兼容性）
+    csv_path = os.path.join(output_dir, f"flow_routing_iteration_{iteration}_{model_version}.csv")
+    df_flow.to_csv(csv_path, index=False)
+    logging.info(f"迭代 {iteration} 汇流计算结果（CSV）已保存至 {csv_path}")
+    
+    # 转换并保存二进制格式
+    binary_dir = os.path.join(output_dir, f"flow_routing_iteration_{iteration}_{model_version}_binary")
+    
+    try:
+        # 导入二进制转换工具
+        import sys
+        import subprocess
+        
+        # 调用CSV到二进制转换脚本
+        script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'scripts', 'csv_to_binary_converter.py')
+        
+        if os.path.exists(script_path):
+            cmd = [sys.executable, script_path, '--input', csv_path, '--output', binary_dir]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                logging.info(f"迭代 {iteration} 汇流计算结果（二进制）已保存至 {binary_dir}")
+            else:
+                logging.warning(f"二进制转换失败: {result.stderr}")
+                binary_dir = None
+        else:
+            logging.warning(f"找不到转换脚本: {script_path}")
+            binary_dir = None
+            
+    except Exception as e:
+        logging.warning(f"转换为二进制格式时出错: {e}")
+        binary_dir = None
+    
+    return binary_dir
 
 
 def time_function(func):

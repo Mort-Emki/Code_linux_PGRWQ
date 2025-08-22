@@ -427,13 +427,157 @@ def flow_routing_calculation(df: pd.DataFrame,
                             E_save: int = 0,
                             E_save_path: str = None,
                             check_anomalies: bool = False,
-                            enable_debug: bool = True) -> pd.DataFrame:
+                            enable_debug: bool = True,
+                            use_efficient_router: bool = True) -> pd.DataFrame:
     """
-    汇流计算主函数 (重构版)
+    汇流计算主函数 - 支持高效无DataFrame模式
+    """
+    
+    if use_efficient_router:
+        # 使用全新的无DataFrame高效计算核心
+        return _flow_routing_calculation_efficient(
+            df, iteration, model_func, river_info, 
+            v_f_TN, v_f_TP, attr_dict, target_col
+        )
+    else:
+        # 保留原有的DataFrame模式（兼容性）
+        return _flow_routing_calculation_legacy(
+            df, iteration, model_func, river_info, v_f_TN, v_f_TP,
+            attr_dict, model, all_target_cols, target_col, attr_df,
+            E_exist, E_exist_path, E_save, E_save_path, check_anomalies, enable_debug
+        )
+
+
+def _flow_routing_calculation_efficient(df: pd.DataFrame, 
+                                      iteration: int, 
+                                      model_func, 
+                                      river_info: pd.DataFrame, 
+                                      v_f_TN: float,
+                                      v_f_TP: float,
+                                      attr_dict: dict,
+                                      target_col: str) -> pd.DataFrame:
+    """
+    高效的无DataFrame流量计算实现
+    """
+    from .efficient_flow_routing import create_efficient_flow_router
+    
+    logging.info(f"使用高效无DataFrame模式进行迭代 {iteration} 的汇流计算")
+    
+    # 检查输入数据格式
+    if '_binary_mode' not in df.columns or not df['_binary_mode'].iloc[0]:
+        raise ValueError("高效模式需要二进制数据输入")
+    
+    binary_data_dir = df['_binary_dir'].iloc[0]
+    
+    # 构建拓扑字典
+    topology_dict = {}
+    for _, row in river_info.iterrows():
+        comid_str = str(row['COMID'])
+        next_down_str = str(row['NextDownID'])
+        if next_down_str != '0' and next_down_str != 'nan':
+            topology_dict[comid_str] = next_down_str
+    
+    # 创建高效流量计算器
+    flow_router = create_efficient_flow_router(
+        binary_data_dir=binary_data_dir,
+        topology_dict=topology_dict,
+        attr_dict=attr_dict
+    )
+    
+    # 选择速度参数
+    v_f_param = v_f_TN if target_col == "TN" else v_f_TP
+    
+    # 执行流量计算（完全无DataFrame）
+    temp_output_dir = f"/tmp/flow_results_iter_{iteration}_{target_col}"
+    result_dir = flow_router.execute_flow_routing(
+        target_col=target_col,
+        model_predictor=model_func,
+        v_f_param=v_f_param,
+        output_binary_dir=temp_output_dir
+    )
+    
+    # 转换结果为DataFrame格式（保持接口兼容性）
+    result_df = _convert_binary_results_to_dataframe(
+        result_dir, iteration, target_col, flow_router
+    )
+    
+    logging.info(f"高效模式汇流计算完成，内存占用极低")
+    return result_df
+
+
+def _convert_binary_results_to_dataframe(result_dir: str, 
+                                       iteration: int, 
+                                       target_col: str,
+                                       flow_router) -> pd.DataFrame:
+    """
+    将二进制计算结果转换为DataFrame（仅用于接口兼容性）
+    """
+    import json
+    
+    # 读取结果元数据
+    metadata_path = os.path.join(result_dir, 'metadata.json')
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+    
+    comid_list = metadata['comid_list']
+    n_days = metadata['n_days']
+    
+    # 加载计算结果
+    y_up_data = np.load(os.path.join(result_dir, f'y_up_{target_col}.npy'))
+    y_n_data = np.load(os.path.join(result_dir, f'y_n_{target_col}.npy'))
+    
+    # 构建最小化的DataFrame
+    result_rows = []
+    
+    for comid_idx, comid_str in enumerate(comid_list):
+        # 只构建非零结果行，进一步减少内存占用
+        y_up_vals = y_up_data[comid_idx]
+        y_n_vals = y_n_data[comid_idx]
+        
+        # 跳过全零的河段
+        if np.allclose(y_up_vals, 0) and np.allclose(y_n_vals, 0):
+            continue
+            
+        # 获取日期（从flow_router的日期映射中）
+        dates = flow_router.dates_mmap[:]  # 所有日期
+        
+        for day_idx in range(n_days):
+            result_rows.append({
+                'COMID': int(comid_str),
+                'date': dates[day_idx],
+                f'y_up_{iteration}_{target_col}': y_up_vals[day_idx],
+                f'y_n_{iteration}_{target_col}': y_n_vals[day_idx]
+            })
+    
+    result_df = pd.DataFrame(result_rows)
+    
+    logging.info(f"结果转换完成：{len(result_df)} 行（仅非零结果）")
+    return result_df
+
+
+def _flow_routing_calculation_legacy(df: pd.DataFrame, 
+                                   iteration: int, 
+                                   model_func, 
+                                   river_info: pd.DataFrame, 
+                                   v_f_TN: float,
+                                   v_f_TP: float,
+                                   attr_dict: dict,
+                                   model,
+                                   all_target_cols: list,
+                                   target_col: str,
+                                   attr_df: pd.DataFrame,
+                                   E_exist: int,
+                                   E_exist_path: str,
+                                   E_save: int,
+                                   E_save_path: str,
+                                   check_anomalies: bool,
+                                   enable_debug: bool) -> pd.DataFrame:
+    """
+    保留的传统DataFrame模式（兼容性）
     """
     # 复制数据框以避免修改原始数据
     df = df.copy()
-    logging.info(f"迭代 {iteration} 的汇流计算开始")
+    logging.info(f"迭代 {iteration} 的汇流计算开始（传统模式）")
     
     # 标识缺失数据的河段
     missing_data_comids = set()
@@ -508,5 +652,5 @@ def flow_routing_calculation(df: pd.DataFrame,
     existing_cols = [col for col in new_cols if col in result_df.columns]
     result_df = result_df[existing_cols]
     
-    logging.info(f"迭代 {iteration} 的汇流计算完成")
+    logging.info(f"迭代 {iteration} 的汇流计算完成（传统模式）")
     return result_df

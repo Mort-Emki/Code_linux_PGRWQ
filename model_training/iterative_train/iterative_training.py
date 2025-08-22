@@ -222,10 +222,16 @@ def iterative_training_procedure(
             exists, flow_result_path = check_existing_flow_routing_results(0, model_version, output_dir)
             if exists and reuse_existing_flow_results:
                 # 如果存在且配置为重用，直接加载已有结果
-                with TimingAndMemoryContext("加载已有汇流计算结果"):
-                    logging.info(f"发现已存在的汇流计算结果，加载：{flow_result_path}")
-                    df_flow = pd.read_csv(flow_result_path)
-                    logging.info(f"成功加载汇流计算结果，共 {len(df_flow)} 条记录")
+                # 检查二进制格式是否存在
+                binary_flow_dir = os.path.join(output_dir, f"flow_routing_iteration_0_{model_version}_binary")
+                if os.path.exists(binary_flow_dir):
+                    logging.info(f"发现已存在的汇流计算结果（二进制格式）：{binary_flow_dir}")
+                    df_flow = None  # 不加载到内存，后续直接使用二进制格式
+                else:
+                    with TimingAndMemoryContext("加载已有汇流计算结果"):
+                        logging.info(f"发现已存在的汇流计算结果，加载：{flow_result_path}")
+                        df_flow = pd.read_csv(flow_result_path)
+                        logging.info(f"成功加载汇流计算结果，共 {len(df_flow)} 条记录")
             else:
                 # 如果不存在或配置为不重用，执行汇流计算
                 with TimingAndMemoryContext("执行初始汇流计算"):
@@ -270,8 +276,8 @@ def iterative_training_procedure(
                             output_dir=flow_results_dir
                         )
 
-                    # 保存汇流计算结果
-                    save_flow_results(df_flow, 0, model_version, output_dir)
+                    # 保存汇流计算结果（CSV + 二进制）
+                    _ = save_flow_results(df_flow, 0, model_version, output_dir)
         else:
             # ======================================================================
             # 从指定迭代次数开始（加载已有模型和汇流结果）
@@ -315,8 +321,14 @@ def iterative_training_procedure(
                 memory_tracker.report()
                 return None
             
-            with TimingAndMemoryContext("加载上一轮汇流计算结果"):
-                df_flow = pd.read_csv(previous_flow_path)
+            # 检查二进制格式是否存在
+            binary_flow_dir = os.path.join(output_dir, f"flow_routing_iteration_{start_from_iteration-1}_{model_version}_binary")
+            if os.path.exists(binary_flow_dir):
+                logging.info(f"发现上一轮汇流计算结果（二进制格式）：{binary_flow_dir}")
+                df_flow = None  # 不加载到内存，后续直接使用二进制格式
+            else:
+                with TimingAndMemoryContext("加载上一轮汇流计算结果"):
+                    df_flow = pd.read_csv(previous_flow_path)
                 logging.info(f"已加载上一轮汇流计算结果: {previous_flow_path}")
         
         # ======================================================================
@@ -330,22 +342,13 @@ def iterative_training_procedure(
                 col_y_n = f'y_n_{it}_{target_col}'
                 col_y_up = f'y_up_{it}_{target_col}'
                 
-                # 显示df_flow中的列，用于调试
-                logging.info(f"df_flow列: {df_flow.columns.tolist()}")
-                
-                # 合并df和df_flow以进行评估
-                merged = pd.merge(
-                    df, df_flow[['COMID', 'date', col_y_n, col_y_up]], 
-                    on=['COMID', 'date'], 
-                    how='left'
+                # 高效收敛性检查（避免大DataFrame合并）
+                y_true, y_pred = _extract_convergence_data_efficiently(
+                    data_handler, df_flow, it, target_col, col_y_n, output_dir, model_version
                 )
                 
-                # 提取y_true和y_pred进行收敛性检查
-                if target_col in merged.columns and col_y_n in merged.columns:
-                    y_true = np.array(merged[target_col].values)
-                    y_pred = np.array(merged[col_y_n].values)
-                else:
-                    logging.error(f"缺少必要的列用于收敛性检查: {target_col} 或 {col_y_n}")
+                if y_true is None or y_pred is None:
+                    logging.error(f"无法提取收敛性检查数据")
                     break
                 
                 # 检查收敛性
@@ -360,13 +363,21 @@ def iterative_training_procedure(
                 # 4. 准备下一轮迭代的训练数据
                 # ======================================================================
                 logging.info("准备下一轮迭代的训练数据")
-                # 准备下一轮迭代的训练数据
-                X_ts_iter, attr_dict_iter, Y_label_iter, COMIDs_iter, _ = data_handler.prepare_next_iteration_data(
-                    df_flow=df_flow,
-                    target_col=target_col,
-                    col_y_n=col_y_n,
-                    col_y_up=col_y_up
-                )
+                # 准备下一轮迭代的训练数据（使用二进制格式）
+                # 构建当前迭代的二进制数据目录路径
+                current_flow_binary_dir = os.path.join(output_dir, f"flow_routing_iteration_{it}_{model_version}_binary")
+                
+                if os.path.exists(current_flow_binary_dir):
+                    X_ts_iter, attr_dict_iter, Y_label_iter, COMIDs_iter, _ = data_handler.prepare_next_iteration_data(
+                        flow_data_binary_dir=current_flow_binary_dir,
+                        target_col=target_col,
+                        col_y_n=col_y_n,
+                        col_y_up=col_y_up
+                    )
+                else:
+                    logging.error(f"二进制流量数据目录不存在: {current_flow_binary_dir}")
+                    logging.error("请确保前一轮迭代正确保存了二进制格式的流量数据")
+                    X_ts_iter = None
                 
                 if X_ts_iter is None:
                     logging.error("准备训练数据失败，无法继续迭代")
@@ -420,10 +431,16 @@ def iterative_training_procedure(
                 
                 if exists and reuse_existing_flow_results:
                     # 如果存在且配置为重用，直接加载已有结果
-                    with TimingAndMemoryContext(f"加载迭代 {it+1} 已有汇流计算结果"):
-                        logging.info(f"发现已存在的汇流计算结果，加载：{flow_result_path}")
-                        df_flow = pd.read_csv(flow_result_path)
-                        logging.info(f"成功加载汇流计算结果，共 {len(df_flow)} 条记录")
+                    # 检查二进制格式是否存在
+                    binary_flow_dir = os.path.join(output_dir, f"flow_routing_iteration_{it+1}_{model_version}_binary")
+                    if os.path.exists(binary_flow_dir):
+                        logging.info(f"发现迭代 {it+1} 汇流计算结果（二进制格式）：{binary_flow_dir}")
+                        df_flow = None  # 不加载到内存，后续直接使用二进制格式
+                    else:
+                        with TimingAndMemoryContext(f"加载迭代 {it+1} 已有汇流计算结果"):
+                            logging.info(f"发现已存在的汇流计算结果，加载：{flow_result_path}")
+                            df_flow = pd.read_csv(flow_result_path)
+                            logging.info(f"成功加载汇流计算结果，共 {len(df_flow)} 条记录")
                 else:
                     # 如果不存在或配置为不重用，执行汇流计算
                     with TimingAndMemoryContext(f"执行迭代 {it+1} 汇流计算"):
@@ -462,43 +479,46 @@ def iterative_training_procedure(
                                 output_dir=flow_results_dir
                             )
                         
-                        # 保存汇流计算结果
-                        save_flow_results(df_flow, it+1, model_version, output_dir)
+                        # 保存汇流计算结果（CSV + 二进制）
+                        _ = save_flow_results(df_flow, it+1, model_version, output_dir)
                 
                 # ======================================================================
                 # 7. 检查数据质量
                 # ======================================================================
                 # 检查此轮迭代的汇流计算结果的异常值
-                logging.info(f"检查迭代 {it+1} 的汇流计算结果质量")
-                is_valid_data, _ = data_validator.check_dataframe_abnormalities(
-                    df_flow, it+1, all_target_cols
-                )
-                
-                # 如果数据无效，尝试修复
-                if not is_valid_data:
-                    logging.warning(f"迭代 {it+1} 的汇流计算结果包含过多异常值，尝试修复...")
-                    
-                    # 修复异常值
-                    df_flow = data_validator.fix_dataframe_abnormalities(
+                if df_flow is not None:
+                    logging.info(f"检查迭代 {it+1} 的汇流计算结果质量")
+                    is_valid_data, _ = data_validator.check_dataframe_abnormalities(
                         df_flow, it+1, all_target_cols
                     )
                     
-                    # 保存修复后的结果
-                    fixed_path = os.path.join(output_dir, f"flow_routing_iteration_{it+1}_{model_version}_fixed.csv")
-                    df_flow.to_csv(fixed_path, index=False)
-                    logging.info(f"修复后的结果已保存至 {fixed_path}")
-                
-                # 验证数据一致性
-                if input_features is not None:
-                    is_coherent = data_validator.validate_data_coherence(
-                        df, df_flow, input_features, all_target_cols, it+1
-                    )
+                    # 如果数据无效，尝试修复
+                    if not is_valid_data:
+                        logging.warning(f"迭代 {it+1} 的汇流计算结果包含过多异常值，尝试修复...")
+                        
+                        # 修复异常值
+                        df_flow = data_validator.fix_dataframe_abnormalities(
+                            df_flow, it+1, all_target_cols
+                        )
+                        
+                        # 保存修复后的结果
+                        fixed_path = os.path.join(output_dir, f"flow_routing_iteration_{it+1}_{model_version}_fixed.csv")
+                        df_flow.to_csv(fixed_path, index=False)
+                        logging.info(f"修复后的结果已保存至 {fixed_path}")
+                    
+                    # 验证数据一致性
+                    if input_features is not None:
+                        is_coherent = data_validator.validate_data_coherence(
+                            df, df_flow, input_features, all_target_cols, it+1
+                        )
+                    else:
+                        is_coherent = True
+                        logging.warning("输入特征为空，跳过数据一致性检查")
+                    
+                    if not is_coherent:
+                        logging.warning(f"数据一致性检查失败，可能会影响迭代 {it+2} 的训练")
                 else:
-                    is_coherent = True
-                    logging.warning("输入特征为空，跳过数据一致性检查")
-                
-                if not is_coherent:
-                    logging.warning(f"数据一致性检查失败，可能会影响迭代 {it+2} 的训练")
+                    logging.info(f"使用二进制模式，跳过迭代 {it+1} 的DataFrame数据质量检查")
         
         # ======================================================================
         # 8. 完成训练
@@ -569,3 +589,159 @@ def _save_final_model(
         logging.error(
             f"保存最终模型时发生错误: {str(e)}"
         )
+
+
+def _extract_convergence_data_efficiently(
+    data_handler, 
+    df_flow, 
+    iteration: int, 
+    target_col: str, 
+    col_y_n: str, 
+    output_dir: str, 
+    model_version: str
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    高效提取收敛性检查数据，避免大DataFrame合并
+    
+    参数:
+        data_handler: 数据处理器
+        df_flow: 流量计算结果DataFrame（可能为None）
+        iteration: 当前迭代次数
+        target_col: 目标列名
+        col_y_n: 预测值列名
+        output_dir: 输出目录
+        model_version: 模型版本
+        
+    返回:
+        (y_true, y_pred): 真实值和预测值数组
+    """
+    try:
+        # 优先使用二进制格式
+        binary_flow_dir = os.path.join(output_dir, f"flow_routing_iteration_{iteration}_{model_version}_binary")
+        
+        if os.path.exists(binary_flow_dir):
+            # 从二进制格式提取数据
+            from ...efficient_data_loader import EfficientDataLoader
+            
+            # 加载流量计算结果的二进制数据
+            flow_loader = EfficientDataLoader(binary_flow_dir)
+            
+            # 获取流量数据的列信息
+            import json
+            flow_metadata_file = os.path.join(binary_flow_dir, 'metadata.json')
+            with open(flow_metadata_file, 'r') as f:
+                flow_metadata = json.load(f)
+            
+            flow_feature_cols = flow_metadata.get('feature_columns', [])
+            
+            if col_y_n not in flow_feature_cols:
+                logging.warning(f"流量数据中缺少列: {col_y_n}")
+                return None, None
+            
+            col_y_n_idx = flow_feature_cols.index(col_y_n)
+            
+            # 获取两个数据源的COMID交集
+            ts_comids = set(data_handler.efficient_loader.comid_index.keys())
+            flow_comids = set(flow_loader.comid_index.keys())
+            valid_comids = list(ts_comids & flow_comids)
+            
+            y_true_list = []
+            y_pred_list = []
+            
+            # 为每个COMID提取对应的数据
+            for comid_str in valid_comids:
+                try:
+                    # 从时间序列数据获取真实值
+                    ts_data, ts_dates = data_handler.efficient_loader.load_comid_with_dates(comid_str)
+                    
+                    # 从流量数据获取预测值
+                    flow_data, flow_dates = flow_loader.load_comid_with_dates(comid_str)
+                    
+                    if len(ts_data) == 0 or len(flow_data) == 0:
+                        continue
+                    
+                    # 找到时间序列数据中目标列的索引
+                    ts_feature_cols = data_handler.input_features
+                    if target_col not in ts_feature_cols:
+                        continue
+                    
+                    target_col_idx = ts_feature_cols.index(target_col)
+                    
+                    # 创建日期到数据的映射
+                    ts_date_map = {date: i for i, date in enumerate(ts_dates)}
+                    flow_date_map = {date: i for i, date in enumerate(flow_dates)}
+                    
+                    # 找到共同的日期
+                    common_dates = set(ts_dates) & set(flow_dates)
+                    
+                    for date in common_dates:
+                        ts_idx = ts_date_map[date]
+                        flow_idx = flow_date_map[date]
+                        
+                        y_true_val = ts_data[ts_idx, target_col_idx]
+                        y_pred_val = flow_data[flow_idx, col_y_n_idx]
+                        
+                        if not (np.isnan(y_true_val) or np.isnan(y_pred_val)):
+                            y_true_list.append(y_true_val)
+                            y_pred_list.append(y_pred_val)
+                
+                except Exception as e:
+                    logging.warning(f"处理COMID {comid_str} 时出错: {e}")
+                    continue
+            
+            if y_true_list and y_pred_list:
+                return np.array(y_true_list), np.array(y_pred_list)
+            else:
+                logging.warning("未能从二进制数据提取收敛性检查数据")
+                return None, None
+        
+        else:
+            # 回退到DataFrame方式（兼容性）
+            if df_flow is None:
+                logging.warning("df_flow为None且二进制数据不存在，无法进行收敛性检查")
+                return None, None
+            
+            logging.info("使用DataFrame进行收敛性检查（内存占用较高）")
+            
+            # 这里仍然需要原始数据df，但我们尽量减少内存占用
+            # 只合并必要的列
+            required_cols = ['COMID', 'date', col_y_n]
+            if col_y_n not in df_flow.columns:
+                logging.error(f"df_flow中缺少列: {col_y_n}")
+                return None, None
+            
+            # 从原始二进制数据中采样一些数据进行收敛性检查
+            sample_size = min(10000, len(df_flow))  # 限制样本大小
+            df_flow_sample = df_flow.sample(n=sample_size)[required_cols]
+            
+            # 构建对应的真实值数据
+            y_true_list = []
+            y_pred_list = []
+            
+            for _, row in df_flow_sample.iterrows():
+                comid = str(row['COMID'])
+                date = row['date']
+                y_pred = row[col_y_n]
+                
+                if comid in data_handler.efficient_loader.comid_index:
+                    try:
+                        ts_data, ts_dates = data_handler.efficient_loader.load_comid_with_dates(comid)
+                        if date in ts_dates:
+                            date_idx = ts_dates.index(date)
+                            target_col_idx = data_handler.input_features.index(target_col)
+                            y_true = ts_data[date_idx, target_col_idx]
+                            
+                            if not (np.isnan(y_true) or np.isnan(y_pred)):
+                                y_true_list.append(y_true)
+                                y_pred_list.append(y_pred)
+                    except:
+                        continue
+            
+            if y_true_list and y_pred_list:
+                return np.array(y_true_list), np.array(y_pred_list)
+            else:
+                return None, None
+    
+    except Exception as e:
+        logging.error(f"提取收敛性检查数据时出错: {e}")
+        return None, None
