@@ -17,17 +17,38 @@ import json
 import argparse
 import sys
 import os
+# 导入数据异常检测功能
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data_processing import detect_and_handle_anomalies
 
 class CSVToBinaryConverter:
-    """CSV到二进制格式的高效转换器"""
+    """CSV到二进制格式的高效转换器 - 带全面数据质量检查"""
     
-    def __init__(self, csv_path: str, output_dir: str, chunk_size: int = 100000):
+    def __init__(self, csv_path: str, output_dir: str, chunk_size: int = 100000, 
+                 enable_data_check: bool = True, fix_anomalies: bool = False,
+                 input_features: list = None, attr_features: list = None,
+                 target_cols: list = None):
         self.csv_path = csv_path
         self.output_dir = Path(output_dir)
         self.chunk_size = chunk_size
+        self.enable_data_check = enable_data_check
+        self.fix_anomalies = fix_anomalies
+        self.input_features = input_features or []
+        self.attr_features = attr_features or []
+        self.target_cols = target_cols or ['TN', 'TP']
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
+        # 记录数据质量检查结果
+        self.quality_report = {
+            'total_anomalies': 0,
+            'fixed_anomalies': 0,
+            'check_results': {}
+        }
+        
         logging.info(f"初始化转换器: {csv_path} -> {output_dir}")
+        if enable_data_check:
+            logging.info("已启用全量数据质量检查")
+            logging.info(f"数据修复模式: {'开启' if fix_anomalies else '关闭'}")
         
     def convert(self):
         """执行转换的主函数"""
@@ -36,11 +57,14 @@ class CSVToBinaryConverter:
         # 第一遍：分析数据结构和统计信息
         metadata = self._analyze_structure()
         
-        # 第二遍：转换数据为NumPy格式
-        data_arrays, comid_index = self._convert_to_binary(metadata)
+        # 第二遍：转换数据为NumPy格式（包含数据质量检查）
+        data_arrays, comid_index = self._convert_to_binary_with_quality_check(metadata)
         
         # 保存结果
         self._save_binary_data(data_arrays, comid_index, metadata)
+        
+        # 保存数据质量报告
+        self._save_quality_report()
         
         logging.info("转换完成！")
         return self.output_dir
@@ -104,9 +128,9 @@ class CSVToBinaryConverter:
         
         return metadata
     
-    def _convert_to_binary(self, metadata):
-        """将CSV转换为高效的二进制格式"""
-        logging.info("第二遍扫描：转换为二进制格式...")
+    def _convert_to_binary_with_quality_check(self, metadata):
+        """将CSV转换为高效的二进制格式（带全面数据质量检查）"""
+        logging.info("第二遍扫描：转换为二进制格式 + 全面数据质量检查...")
         
         total_rows = metadata['total_rows']
         numeric_cols = metadata['numeric_cols']
@@ -122,8 +146,12 @@ class CSVToBinaryConverter:
         current_row = 0
         chunk_iter = pd.read_csv(self.csv_path, chunksize=self.chunk_size)
         
-        for chunk in tqdm(chunk_iter, desc="转换数据", total=total_rows//self.chunk_size + 1):
+        for chunk in tqdm(chunk_iter, desc="转换数据 + 数据质量检查", total=total_rows//self.chunk_size + 1):
             chunk_size = len(chunk)
+            
+            # 数据质量检查
+            if self.enable_data_check:
+                chunk = self._perform_quality_check(chunk)
             
             # 处理数值数据
             numeric_data[current_row:current_row + chunk_size] = chunk[numeric_cols].values.astype(np.float32)
@@ -174,6 +202,90 @@ class CSVToBinaryConverter:
             'columns': numeric_cols
         }, optimized_index
     
+    def _perform_quality_check(self, chunk):
+        """对数据块执行全面的质量检查"""
+        original_chunk = chunk.copy()
+        
+        try:
+            # 1. 检查流量数据 (Qout)
+            if 'Qout' in chunk.columns:
+                chunk, qout_results = detect_and_handle_anomalies(
+                    chunk,
+                    columns_to_check=['Qout'],
+                    fix_negative=self.fix_anomalies,
+                    fix_outliers=self.fix_anomalies,
+                    fix_nan=self.fix_anomalies,
+                    negative_replacement=0.001,
+                    nan_replacement=0.001,
+                    outlier_method='iqr',
+                    outlier_threshold=4.0,
+                    verbose=False,  # 批量处理时减少日志
+                    data_type='timeseries',
+                    logger=logging
+                )
+                self._accumulate_check_results('Qout', qout_results)
+            
+            # 2. 检查输入特征
+            available_input_features = [col for col in self.input_features if col in chunk.columns]
+            if available_input_features:
+                chunk, input_results = detect_and_handle_anomalies(
+                    chunk,
+                    columns_to_check=available_input_features,
+                    check_negative=False,  # 输入特征可能为负
+                    fix_nan=self.fix_anomalies,
+                    negative_replacement=0.0,
+                    nan_replacement=0.0,
+                    outlier_method='iqr',
+                    outlier_threshold=6.0,
+                    verbose=False,
+                    data_type='timeseries',
+                    logger=logging
+                )
+                self._accumulate_check_results('input_features', input_results)
+            
+            # 3. 检查水质目标数据
+            available_target_cols = [col for col in self.target_cols if col in chunk.columns]
+            if available_target_cols:
+                chunk, target_results = detect_and_handle_anomalies(
+                    chunk,
+                    columns_to_check=available_target_cols,
+                    check_nan=False,  # 水质数据允许NaN
+                    fix_nan=False,   # 不自动填充水质NaN
+                    negative_replacement=0.001,
+                    outlier_method='iqr',
+                    outlier_threshold=6.0,
+                    verbose=False,
+                    data_type='timeseries',
+                    logger=logging
+                )
+                self._accumulate_check_results('target_cols', target_results)
+            
+        except Exception as e:
+            logging.warning(f"数据块质量检查失败，使用原始数据: {e}")
+            return original_chunk
+        
+        return chunk
+    
+    def _accumulate_check_results(self, check_type, results):
+        """累积质量检查结果"""
+        if check_type not in self.quality_report['check_results']:
+            self.quality_report['check_results'][check_type] = {
+                'total_checks': 0,
+                'anomalies_found': 0,
+                'anomalies_fixed': 0
+            }
+        
+        result_summary = self.quality_report['check_results'][check_type]
+        result_summary['total_checks'] += 1
+        
+        if results.get('has_anomalies', False):
+            result_summary['anomalies_found'] += 1
+            self.quality_report['total_anomalies'] += 1
+            
+            if self.fix_anomalies:
+                result_summary['anomalies_fixed'] += 1
+                self.quality_report['fixed_anomalies'] += 1
+    
     def _save_binary_data(self, data_arrays, comid_index, metadata):
         """保存二进制数据和索引"""
         logging.info("保存二进制文件...")
@@ -223,6 +335,44 @@ class CSVToBinaryConverter:
         logging.info(f"✓ 总文件大小: {total_size_mb:.1f} MB")
         logging.info(f"✓ COMID索引: {len(comid_index):,} 个")
         logging.info(f"✓ 输出目录: {self.output_dir}")
+    
+    def _save_quality_report(self):
+        """保存数据质量检查报告"""
+        if not self.enable_data_check:
+            return
+        
+        # 计算总体统计
+        self.quality_report['summary'] = {
+            'data_check_enabled': self.enable_data_check,
+            'fix_anomalies_enabled': self.fix_anomalies,
+            'total_anomaly_rate': (self.quality_report['total_anomalies'] / 
+                                 max(1, sum(r['total_checks'] for r in self.quality_report['check_results'].values()))),
+            'fix_success_rate': (self.quality_report['fixed_anomalies'] / 
+                               max(1, self.quality_report['total_anomalies'])) if self.quality_report['total_anomalies'] > 0 else 0
+        }
+        
+        # 保存质量报告
+        quality_file = self.output_dir / 'data_quality_report.json'
+        with open(quality_file, 'w', encoding='utf-8') as f:
+            json.dump(self.quality_report, f, indent=2, ensure_ascii=False)
+        
+        # 输出质量检查摘要
+        logging.info("=" * 60)
+        logging.info("📊 数据质量检查摘要:")
+        logging.info("=" * 60)
+        logging.info(f"✓ 数据质量检查: {'已启用' if self.enable_data_check else '已禁用'}")
+        logging.info(f"✓ 异常数据修复: {'已启用' if self.fix_anomalies else '已禁用'}")
+        logging.info(f"✓ 检查的数据块: {sum(r['total_checks'] for r in self.quality_report['check_results'].values())} 个")
+        logging.info(f"✓ 发现异常数据块: {self.quality_report['total_anomalies']} 个")
+        if self.fix_anomalies and self.quality_report['total_anomalies'] > 0:
+            logging.info(f"✓ 修复异常数据块: {self.quality_report['fixed_anomalies']} 个")
+        
+        for check_type, results in self.quality_report['check_results'].items():
+            anomaly_rate = results['anomalies_found'] / max(1, results['total_checks'])
+            logging.info(f"  - {check_type}: {results['anomalies_found']}/{results['total_checks']} 异常 ({anomaly_rate:.1%})")
+        
+        logging.info(f"✓ 质量报告已保存: {quality_file}")
+        logging.info("=" * 60)
 
 
 def setup_logging():
@@ -239,12 +389,31 @@ def setup_logging():
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='CSV到二进制格式转换器 - 为深度学习优化')
+    parser = argparse.ArgumentParser(description='CSV到二进制格式转换器 - 为深度学习优化 (带全面数据质量检查)')
     parser.add_argument('--input', required=True, help='输入CSV文件路径')
     parser.add_argument('--output', required=True, help='输出目录路径')
     parser.add_argument('--chunk-size', type=int, default=100000, help='处理块大小 (默认: 100000)')
     
+    # 数据质量检查选项
+    parser.add_argument('--enable-data-check', action='store_true', default=True, 
+                       help='启用全面数据质量检查 (默认: True)')
+    parser.add_argument('--disable-data-check', action='store_true',
+                       help='禁用数据质量检查')
+    parser.add_argument('--fix-anomalies', action='store_true', 
+                       help='自动修复检测到的异常数据 (默认: False)')
+    
+    # 特征配置选项
+    parser.add_argument('--input-features', nargs='*', 
+                       default=['TN', 'TP', 'Qout', 'precipitation', 'temperature_2m_mean', 'runoff'],
+                       help='输入特征列表')
+    parser.add_argument('--target-cols', nargs='*', 
+                       default=['TN', 'TP'],
+                       help='目标列列表')
+    
     args = parser.parse_args()
+    
+    # 处理数据检查选项
+    enable_data_check = args.enable_data_check and not args.disable_data_check
     
     # 设置日志
     setup_logging()
@@ -260,8 +429,16 @@ def main():
     if file_size_gb > 50:
         logging.warning(f"输入文件很大 ({file_size_gb:.1f} GB)，转换可能需要较长时间")
     
-    # 创建转换器
-    converter = CSVToBinaryConverter(args.input, args.output, args.chunk_size)
+    # 创建转换器（带数据质量检查功能）
+    converter = CSVToBinaryConverter(
+        csv_path=args.input,
+        output_dir=args.output,
+        chunk_size=args.chunk_size,
+        enable_data_check=enable_data_check,
+        fix_anomalies=args.fix_anomalies,
+        input_features=args.input_features,
+        target_cols=args.target_cols
+    )
     
     try:
         # 执行转换

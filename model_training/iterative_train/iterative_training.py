@@ -26,7 +26,7 @@ from ..gpu_memory_utils import (
 # 导入自定义组件
 from .data_handler import DataHandler
 from .model_manager import ModelManager
-from .evaluation import ConvergenceChecker, DataValidator, ModelVisualizer
+from .evaluation import ConvergenceChecker, EfficientDataValidator, MinimalVisualizer
 from .utils import (
     check_existing_flow_routing_results,
     create_predictor,
@@ -135,7 +135,7 @@ def iterative_training_procedure(
     
     convergence_checker = ConvergenceChecker(epsilon=epsilon)
     
-    data_validator = DataValidator()
+    data_validator = EfficientDataValidator()
     
     # 初始化模型变量
     model: Optional[Any] = None
@@ -202,17 +202,8 @@ def iterative_training_procedure(
                 train_data=train_val_data
             )
             
-            # 在初始模型训练后添加验证
-            ModelVisualizer.verify_initial_model(
-                model=model,
-                data_handler=data_handler,
-                model_manager=model_manager,
-                comid_wq_list=comid_wq_list,
-                all_target_cols=all_target_cols,
-                target_col=target_col,
-                model_save_dir=model_save_dir,
-                model_version=model_version
-            )
+            # 在初始模型训练后添加简化验证
+            logging.info("初始模型训练完成，跳过可视化验证（使用高效模式）")
             
 
             # 创建批处理函数
@@ -264,17 +255,8 @@ def iterative_training_procedure(
                         memory_tracker.report()
                         return None
                     
-                    # 汇流计算完成后验证结果
-                    if comid_wq_list is not None and 'df_flow' in locals():
-                        ModelVisualizer.verify_flow_results(
-                            iteration=0,
-                            model_version=model_version,
-                            df_flow=df_flow,
-                            original_df=df,
-                            target_col=target_col,
-                            comid_wq_list=comid_wq_list,
-                            output_dir=flow_results_dir
-                        )
+                    # 汇流计算完成后的简化验证
+                    logging.info("初始汇流计算完成，跳过可视化验证（使用高效模式）")
 
                     # 保存汇流计算结果（CSV + 二进制）
                     _ = save_flow_results(df_flow, 0, model_version, output_dir)
@@ -467,62 +449,51 @@ def iterative_training_procedure(
                             logging.error("河段信息为空，无法进行汇流计算")
                             break
                         
-                        # 执行新一轮汇流计算后验证结果
-                        if df_flow is not None and comid_wq_list is not None:  # 确保df_flow已定义
-                            ModelVisualizer.verify_flow_results(
-                                iteration=it+1,
-                                model_version=model_version,
-                                df_flow=df_flow,
-                                original_df=df,
-                                target_col=target_col,
-                                comid_wq_list=comid_wq_list,
-                                output_dir=flow_results_dir
-                            )
+                        # 执行新一轮汇流计算后的简化验证
+                        logging.info(f"迭代 {it+1} 汇流计算完成，跳过可视化验证（使用高效模式）")
                         
                         # 保存汇流计算结果（CSV + 二进制）
                         _ = save_flow_results(df_flow, it+1, model_version, output_dir)
                 
                 # ======================================================================
-                # 7. 检查数据质量
+                # 7. 高效数据质量检查
                 # ======================================================================
-                # 检查此轮迭代的汇流计算结果的异常值
-                if df_flow is not None:
-                    logging.info(f"检查迭代 {it+1} 的汇流计算结果质量")
-                    is_valid_data, _ = data_validator.check_dataframe_abnormalities(
-                        df_flow, it+1, all_target_cols
+                # 检查二进制结果质量（无DataFrame操作）
+                binary_result_dir = os.path.join(output_dir, f"flow_results_iter_{it+1}_{target_col}")
+                
+                if os.path.exists(binary_result_dir):
+                    logging.info(f"检查迭代 {it+1} 的二进制结果质量")
+                    is_valid_data, report = data_validator.validate_binary_results(
+                        binary_result_dir, target_col, it+1
                     )
                     
                     # 如果数据无效，尝试修复
                     if not is_valid_data:
-                        logging.warning(f"迭代 {it+1} 的汇流计算结果包含过多异常值，尝试修复...")
+                        logging.warning(f"迭代 {it+1} 的计算结果包含过多异常值，尝试修复...")
                         
                         # 修复异常值
-                        df_flow = data_validator.fix_dataframe_abnormalities(
-                            df_flow, it+1, all_target_cols
+                        fixed_result_dir = data_validator.fix_binary_results_if_needed(
+                            binary_result_dir, target_col, reasonable_max=100.0
                         )
                         
-                        # 保存修复后的结果
-                        fixed_path = os.path.join(output_dir, f"flow_routing_iteration_{it+1}_{model_version}_fixed.csv")
-                        df_flow.to_csv(fixed_path, index=False)
-                        logging.info(f"修复后的结果已保存至 {fixed_path}")
+                        if fixed_result_dir != binary_result_dir:
+                            logging.info(f"修复后的结果已保存至 {fixed_result_dir}")
                     
-                    # 验证数据一致性
-                    if input_features is not None:
-                        is_coherent = data_validator.validate_data_coherence(
-                            df, df_flow, input_features, all_target_cols, it+1
-                        )
-                    else:
-                        is_coherent = True
-                        logging.warning("输入特征为空，跳过数据一致性检查")
-                    
-                    if not is_coherent:
-                        logging.warning(f"数据一致性检查失败，可能会影响迭代 {it+2} 的训练")
+                    logging.info(f"迭代 {it+1} 数据质量检查完成（高效模式）")
                 else:
-                    logging.info(f"使用二进制模式，跳过迭代 {it+1} 的DataFrame数据质量检查")
+                    logging.info(f"二进制结果目录不存在，跳过质量检查: {binary_result_dir}")
         
         # ======================================================================
         # 8. 完成训练
         # ======================================================================
+        # 生成收敛图
+        try:
+            MinimalVisualizer.create_convergence_plot(
+                convergence_checker, flow_results_dir, model_version
+            )
+        except Exception as e:
+            logging.warning(f"生成收敛图时出错: {e}")
+        
         # 生成内存报告
         memory_tracker.stop()
         _ = memory_tracker.report()
@@ -534,6 +505,7 @@ def iterative_training_procedure(
         final_iter = min(it+1 if 'it' in locals() else 0, max_iterations)
         _save_final_model(model, final_iter, model_version, model_save_dir)
         
+        logging.info("高效无DataFrame训练完成，内存占用极低")
         return model
         
     except Exception as e:

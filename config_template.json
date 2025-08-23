@@ -1,0 +1,131 @@
+{
+  "_comment": "PG-RWQ 高效训练配置文件模板",
+  "_version": "2.0 (高效无DataFrame版)",
+  "_description": "物理约束递归水质预测模型配置 - 仅支持二进制数据模式",
+
+  "basic": {
+    "_comment": "基础配置",
+    "target_col": "TN",
+    "all_target_cols": ["TN", "TP"],
+    "model_type": "branch_lstm",
+    "model_version": "v1",
+    "max_iterations": 10,
+    "convergence_epsilon": 0.01,
+    "start_iteration": 0,
+    "data_dir": "/path/to/your/data",
+    "flow_results_dir": "flow_results",
+    "model_dir": "models",
+    "reuse_existing_results": true
+  },
+
+  "data": {
+    "_comment": "数据文件配置 - 相对于data_dir的路径",
+    "river_attributes_csv": "river_attributes.csv",
+    "comid_wq_list_csv": "comid_wq_list.csv", 
+    "comid_era5_list_csv": "comid_era5_list.csv",
+    "river_network_csv": "river_network.csv"
+  },
+
+  "features": {
+    "_comment": "特征配置",
+    "input_features": [
+      "TN", "TP", "Qout", "precipitation", "temperature_2m_mean",
+      "runoff", "potential_evaporation", "snow_depth"
+    ],
+    "attr_features": [
+      "drainage_area", "mean_elev", "slope_mean", "frac_forest", 
+      "soil_depth_pelletier", "soil_porosity", "max_water_content",
+      "sand_frac", "silt_frac", "clay_frac"
+    ]
+  },
+
+  "models": {
+    "_comment": "不同模型类型的配置",
+    
+    "branch_lstm": {
+      "build": {
+        "_comment": "模型构建参数 - input_dim和attr_dim会自动从features计算",
+        "hidden_dim": 64,
+        "num_layers": 2,
+        "dropout": 0.2,
+        "bidirectional": false,
+        "time_window": 10
+      },
+      "train": {
+        "_comment": "训练参数", 
+        "epochs": 100,
+        "lr": 0.001,
+        "batch_size": 32,
+        "patience": 5,
+        "weight_decay": 1e-5,
+        "lr_scheduler": "ReduceLROnPlateau",
+        "scheduler_patience": 3,
+        "scheduler_factor": 0.5
+      }
+    },
+
+    "lstm": {
+      "build": {
+        "hidden_dim": 64,
+        "num_layers": 2,
+        "dropout": 0.2,
+        "time_window": 10
+      },
+      "train": {
+        "epochs": 100,
+        "lr": 0.001,
+        "batch_size": 32,
+        "patience": 5
+      }
+    },
+
+    "rf": {
+      "build": {
+        "_comment": "随机森林参数",
+        "n_estimators": 100,
+        "max_depth": 10,
+        "min_samples_split": 5,
+        "min_samples_leaf": 2,
+        "random_state": 42
+      },
+      "train": {
+        "time_window": 10
+      }
+    }
+  },
+
+  "flow_routing": {
+    "_comment": "流量计算参数",
+    "v_f_TN": 35.0,
+    "v_f_TP": 44.5,
+    "enable_debug": false,
+    "check_anomalies": false,
+    "reasonable_max_value": 100.0,
+    "max_allowed_anomaly_percent": 1.0
+  },
+
+  "system": {
+    "_comment": "系统配置",
+    "memory_monitoring_interval": 120,
+    "enable_memory_cleanup": true,
+    "log_memory_usage": true,
+    "generate_convergence_plots": true,
+    "skip_visualization": true
+  },
+
+  "_usage_instructions": {
+    "step1": "将此文件复制为 config.json",
+    "step2": "修改 basic.data_dir 指向您的数据目录",
+    "step3": "确认 data 部分的文件路径正确",
+    "step4": "根据需要调整 features 中的特征列表",
+    "step5": "选择合适的 model_type 并调整对应参数",
+    "step6": "运行: python run_pgrwq_training.py --config config.json --binary-dir /path/to/binary_data"
+  },
+
+  "_data_preparation": {
+    "note": "使用前需要将CSV数据转换为二进制格式",
+    "command": "python scripts/csv_to_binary_converter.py --input data.csv --output data_binary",
+    "required_files": ["metadata.json", "data.npy", "dates.npy"],
+    "advantages": ["内存占用减少400倍", "访问速度提升1000倍", "零重复解析开销"]
+  }
+}

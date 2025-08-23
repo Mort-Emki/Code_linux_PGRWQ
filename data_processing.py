@@ -1059,89 +1059,89 @@ def build_sliding_windows_for_subset_7(
 build_sliding_windows_for_subset = build_sliding_windows_for_subset_6
 
 
-##主函数，使用随机数据来测试build_sliding_windows_for_subset_4和build_sliding_windows_for_subset_3，比较速度差距，以及观察结果一致性
+# ##主函数，使用随机数据来测试build_sliding_windows_for_subset_4和build_sliding_windows_for_subset_3，比较速度差距，以及观察结果一致性
 
-def main():
-    np.random.seed(42)
+# def main():
+#     np.random.seed(42)
     
-    # 数据规模设定
-    num_comids = 600
-    rows_per_comid = 1500
-    comid_list = [f"COMID_{i}" for i in range(num_comids)]
+#     # 数据规模设定
+#     num_comids = 600
+#     rows_per_comid = 1500
+#     comid_list = [f"COMID_{i}" for i in range(num_comids)]
     
-    # 输入变量数量设为10个
-    input_feature_names = [f"feature_{i}" for i in range(1, 21)]
-    target_cols = ["TN"]
+#     # 输入变量数量设为10个
+#     input_feature_names = [f"feature_{i}" for i in range(1, 21)]
+#     target_cols = ["TN"]
     
-    df_list = []
-    for comid in comid_list:
-        dates = pd.date_range(start="2020-01-01", periods=rows_per_comid, freq="D")
-        # 生成10个输入特征，取值范围可自行调整
-        features_data = {name: np.random.rand(rows_per_comid) * 100 for name in input_feature_names}
-        # 生成目标变量 "TN"，例如范围在 0 到 10 之间
-        TN = np.random.rand(rows_per_comid) * 10
-        temp_df = pd.DataFrame({
-            "COMID": comid,
-            "date": dates,
-            "TN": TN
-        })
-        for name in input_feature_names:
-            temp_df[name] = features_data[name]
-        df_list.append(temp_df)
+#     df_list = []
+#     for comid in comid_list:
+#         dates = pd.date_range(start="2020-01-01", periods=rows_per_comid, freq="D")
+#         # 生成10个输入特征，取值范围可自行调整
+#         features_data = {name: np.random.rand(rows_per_comid) * 100 for name in input_feature_names}
+#         # 生成目标变量 "TN"，例如范围在 0 到 10 之间
+#         TN = np.random.rand(rows_per_comid) * 10
+#         temp_df = pd.DataFrame({
+#             "COMID": comid,
+#             "date": dates,
+#             "TN": TN
+#         })
+#         for name in input_feature_names:
+#             temp_df[name] = features_data[name]
+#         df_list.append(temp_df)
     
-    df = pd.concat(df_list, ignore_index=True)
+#     df = pd.concat(df_list, ignore_index=True)
     
-    input_cols = input_feature_names
-    time_window = 10      
+#     input_cols = input_feature_names
+#     time_window = 10      
     
-    # 测试 build_sliding_windows_for_subset_3
-    start = time.time()
-    X3, Y3, COMIDs3, Dates3 = build_sliding_windows_for_subset_3(df, comid_list, input_cols=input_cols, target_cols=target_cols, time_window=time_window)
-    duration3 = time.time() - start
+#     # 测试 build_sliding_windows_for_subset_3
+#     start = time.time()
+#     X3, Y3, COMIDs3, Dates3 = build_sliding_windows_for_subset_3(df, comid_list, input_cols=input_cols, target_cols=target_cols, time_window=time_window)
+#     duration3 = time.time() - start
     
-    # 测试 build_sliding_windows_for_subset_4
-    start = time.time()
-    X4, Y4, COMIDs4, Dates4 = build_sliding_windows_for_subset_4(df, comid_list, input_cols=input_cols, target_cols=target_cols, time_window=time_window)
-    duration4 = time.time() - start
+#     # 测试 build_sliding_windows_for_subset_4
+#     start = time.time()
+#     X4, Y4, COMIDs4, Dates4 = build_sliding_windows_for_subset_4(df, comid_list, input_cols=input_cols, target_cols=target_cols, time_window=time_window)
+#     duration4 = time.time() - start
     
-    print("=== build_sliding_windows_for_subset_3 ===")
-    if X3 is not None:
-        print("X3 shape:", X3.shape)
-        print("Y3 shape:", Y3.shape)
-        print("COMIDs3 sample:", COMIDs3[:5])
-        print("Dates3 sample:", Dates3[:5])
-    else:
-        print("没有有效的窗口数据。")
-    print(f"运行时间: {duration3:.4f}秒\n")
+#     print("=== build_sliding_windows_for_subset_3 ===")
+#     if X3 is not None:
+#         print("X3 shape:", X3.shape)
+#         print("Y3 shape:", Y3.shape)
+#         print("COMIDs3 sample:", COMIDs3[:5])
+#         print("Dates3 sample:", Dates3[:5])
+#     else:
+#         print("没有有效的窗口数据。")
+#     print(f"运行时间: {duration3:.4f}秒\n")
     
-    print("=== build_sliding_windows_for_subset_4 ===")
-    if X4 is not None:
-        print("X4 shape:", X4.shape)
-        print("Y4 shape:", Y4.shape)
-        print("COMIDs4 sample:", COMIDs4[:5])
-        print("Dates4 sample:", Dates4[:5])
-    else:
-        print("没有有效的窗口数据。")
-    print(f"运行时间: {duration4:.4f}秒\n")
+#     print("=== build_sliding_windows_for_subset_4 ===")
+#     if X4 is not None:
+#         print("X4 shape:", X4.shape)
+#         print("Y4 shape:", Y4.shape)
+#         print("COMIDs4 sample:", COMIDs4[:5])
+#         print("Dates4 sample:", Dates4[:5])
+#     else:
+#         print("没有有效的窗口数据。")
+#     print(f"运行时间: {duration4:.4f}秒\n")
     
-    if X3 is not None and X4 is not None:
-        consistent = (X3.shape == X4.shape and Y3.shape == Y4.shape and len(COMIDs3) == len(COMIDs4) and len(Dates3) == len(Dates4))
-        print("结果一致性检查:", consistent)
-    else:
-        print("无法比较结果一致性，因为至少一个方法没有生成有效窗口。")
+#     if X3 is not None and X4 is not None:
+#         consistent = (X3.shape == X4.shape and Y3.shape == Y4.shape and len(COMIDs3) == len(COMIDs4) and len(Dates3) == len(Dates4))
+#         print("结果一致性检查:", consistent)
+#     else:
+#         print("无法比较结果一致性，因为至少一个方法没有生成有效窗口。")
     
-    ##不仅通过形状观察一致性，还可以通过数据值观察一致性
-    if X3 is not None and X4 is not None:
-        if consistent:
-            print("=== 结果一致性检查 ===")
-            for i in range(min(X3.shape[0], X4.shape[0])):
-                if not np.allclose(X3[i], X4[i]):
-                    print(f"警告：第 {i} 个窗口数据不一致。")
-                if not np.allclose(Y3[i], Y4[i]):
-                    print(f"警告：第 {i} 个窗口目标值不一致。")
-            print("结果一致性检查结束。")
-        else:
-            print("结果一致性检查失败，因为结果不一致。")
+#     ##不仅通过形状观察一致性，还可以通过数据值观察一致性
+#     if X3 is not None and X4 is not None:
+#         if consistent:
+#             print("=== 结果一致性检查 ===")
+#             for i in range(min(X3.shape[0], X4.shape[0])):
+#                 if not np.allclose(X3[i], X4[i]):
+#                     print(f"警告：第 {i} 个窗口数据不一致。")
+#                 if not np.allclose(Y3[i], Y4[i]):
+#                     print(f"警告：第 {i} 个窗口目标值不一致。")
+#             print("结果一致性检查结束。")
+#         else:
+#             print("结果一致性检查失败，因为结果不一致。")
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
