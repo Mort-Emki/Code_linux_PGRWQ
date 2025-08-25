@@ -8,8 +8,8 @@ random_forest.py - 随机森林模型实现
 import numpy as np
 import logging
 import os
-from PGRWQI.model_training.models.models import CatchmentModel
-from PGRWQI.model_training.gpu_memory_utils import TimingAndMemoryContext
+from .models import CatchmentModel
+from ..gpu_memory_utils import TimingAndMemoryContext
 
 class RandomForestModel(CatchmentModel):
     """

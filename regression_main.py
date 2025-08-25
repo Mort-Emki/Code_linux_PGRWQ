@@ -26,7 +26,8 @@ from typing import Dict, Any, List, Optional, Tuple
 logging.getLogger().setLevel(logging.DEBUG)
 
 # 导入自定义模块
-from .data_processing import load_daily_data, load_river_attributes, detect_and_handle_anomalies, check_river_network_consistency
+from .data_processing import load_daily_data, load_river_attributes, check_river_network_consistency
+from .data_quality_checker import comprehensive_data_quality_check
 from .model_training.iterative_train.iterative_training import iterative_training_procedure
 from .logging_utils import setup_logging, restore_stdout_stderr, ensure_dir_exists
 # from .tqdm_logging import tqdm  # Currently unused
@@ -253,92 +254,25 @@ def load_data(data_config: Dict[str, str],
                 exclude_comids = attr_df[attr_df['ERA5_exist'] == 0]['COMID'].tolist()
                 logging.info(f"将排除 {len(exclude_comids)} 个ERA5_exist=0的河段进行属性数据检测")
 
-        # 1. 检查日尺度数据中的流量数据
-        logging.info("1. 检查流量数据 (Qout)...")
-        df, qout_results = detect_and_handle_anomalies(
-            df, 
-            columns_to_check=['Qout'], 
-            fix_negative=fix_anomalies,
-            fix_outliers=fix_anomalies,
-            fix_nan=fix_anomalies,
-            negative_replacement=0.001,
-            nan_replacement=0.001,
-            outlier_method='iqr',
-            outlier_threshold=4,
+        # 使用统一的数据质量检查接口
+        df, attr_df, quality_report = comprehensive_data_quality_check(
+            df=df,
+            attr_df=attr_df,
+            input_features=input_features,
+            target_cols=all_target_cols,
+            attr_features=attr_features,
+            fix_anomalies=fix_anomalies,
             verbose=True,
-            data_type='timeseries',
-            logger=logging
+            logger=logging,
+            exclude_comids=exclude_comids,
+            data_type='timeseries'
         )
         
-        # 2. 检查日尺度数据中的输入特征
-        logging.info("2. 检查日尺度输入特征...")
-        available_input_features = [col for col in input_features if col in df.columns]
-        if available_input_features:
-            df, input_results = detect_and_handle_anomalies(
-                df,
-                columns_to_check=available_input_features,
-                check_negative=False, ## 输入特征ymin可能为负，不应检查
-                # fix_negative=False, ## 输入特征ymin可能为负，不应修复
-                # fix_outliers=fix_anomalies,
-                fix_nan=fix_anomalies,
-                negative_replacement=0.0,  # 输入特征用0填充可能更合适
-                nan_replacement=0.0,  # 输入特征用0填充可能更合适
-                outlier_method='iqr',
-                outlier_threshold=6.0,  # 输入特征使用更严格的阈值
-                verbose=True,
-                logger=logging,
-                data_type='timeseries',
-                exclude_comids=exclude_comids,
-            )
-        else:
-            logging.warning("未找到可检查的输入特征列")
-            input_results = {'has_anomalies': False}
-        
-        # 3. 检查水质目标数据
-        logging.info("3. 检查水质目标数据...")
-        available_target_cols = [col for col in all_target_cols if col in df.columns]
-        if available_target_cols:
-            df, target_results = detect_and_handle_anomalies(
-                df,
-                columns_to_check=available_target_cols,
-                check_nan = False,
-                # fix_negative=fix_anomalies,
-                # fix_outliers=fix_anomalies,
-                fix_nan=False, ## 水质数据不填充NaN
-                negative_replacement=0.001,  # 水质数据最小值设为0.001
-                outlier_method='iqr',
-                outlier_threshold=6.0,
-                verbose=True,
-                data_type='timeseries',
-                logger=logging
-            )
-        else:
-            logging.warning("未找到可检查的水质目标列")
-            target_results = {'has_anomalies': False}
-        
-        # 4. 检查属性数据
-        logging.info("4. 检查河段属性数据...")
-        available_attr_features = [col for col in attr_features if col in attr_df.columns]
-        if available_attr_features:
-            attr_df, attr_results = detect_and_handle_anomalies(
-                attr_df,
-                columns_to_check=available_attr_features,
-                check_negative=False,
-                # fix_negative=False,
-                # fix_outliers=fix_anomalies,
-                fix_nan=fix_anomalies,
-                negative_replacement=0.001,
-                nan_replacement=0.001,
-                outlier_method='iqr',
-                outlier_threshold=4,
-                verbose=True,
-                logger=logging,
-                data_type='attributes',
-                exclude_comids=exclude_comids,
-            )
-        else:
-            logging.warning("未找到可检查的属性特征列")
-            attr_results = {'has_anomalies': False}
+        # 提取检查结果（保持兼容性）
+        qout_results = quality_report.get('qout', {'has_anomalies': False})
+        input_results = quality_report.get('input_features', {'has_anomalies': False})
+        target_results = quality_report.get('target_data', {'has_anomalies': False})
+        attr_results = quality_report.get('attr_data', {'has_anomalies': False})
         
         # # 5. 数据完整性检查
         # logging.info("5. 检查数据完整性...")

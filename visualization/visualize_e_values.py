@@ -21,13 +21,13 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import utilities from PG-RWQ
-from logging_utils import setup_logging, restore_stdout_stderr, ensure_dir_exists
+from ..logging_utils import setup_logging, restore_stdout_stderr, ensure_dir_exists
 
 # Import visualization modules
-from visualization.extractor import extract_e_values
-from visualization.geo_utils import load_river_network_geo, join_e_values_with_geo
-from visualization.static_map import create_e_value_map
-from visualization.interactive_map import create_interactive_map
+from .extractor import extract_e_values
+from .geo_utils import load_river_network_geo, join_e_values_with_geo
+from .static_map import create_e_value_map
+from .interactive_map import create_interactive_map
 
 def main():
     """Main function for the visualization script"""

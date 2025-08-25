@@ -17,13 +17,13 @@ def create_model(model_type: str, **kwargs):
         Model instance
     """
     if model_type == 'lstm':
-        from PGRWQI.model_training.models.BranchLstm import create_branch_lstm_model
+        from .BranchLstm import create_branch_lstm_model
         return create_branch_lstm_model(**kwargs)
     elif model_type == 'rf':
-        from PGRWQI.model_training.models.RandomForest import create_random_forest_model
+        from .RandomForest import create_random_forest_model
         return create_random_forest_model(**kwargs)
     elif model_type.startswith('regression'):
-        from PGRWQI.model_training.models.RegressionModel import create_regression_model
+        from .RegressionModel import create_regression_model
         # Extract regression subtype if specified (e.g., 'regression_ridge')
         if '_' in model_type:
             reg_type = model_type.split('_')[1]
@@ -33,7 +33,7 @@ def create_model(model_type: str, **kwargs):
             return create_regression_model(**kwargs)
     elif model_type == 'informer':
         # Example of a new model type
-        from PGRWQI.model_training.models.Informer import create_informer_model
+        from .Informer import create_informer_model
         return create_informer_model(**kwargs)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")

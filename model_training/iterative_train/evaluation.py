@@ -9,7 +9,7 @@ import numpy as np
 import logging
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
-from PGRWQI.model_training.gpu_memory_utils import TimingAndMemoryContext
+from ..gpu_memory_utils import TimingAndMemoryContext
 
 
 class ConvergenceChecker:

@@ -19,7 +19,7 @@ import sys
 import os
 # 导入数据异常检测功能
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_processing import detect_and_handle_anomalies
+from ..data_quality_checker import check_qout_data, check_input_features, check_target_data
 
 class CSVToBinaryConverter:
     """CSV到二进制格式的高效转换器 - 带全面数据质量检查"""
@@ -209,56 +209,40 @@ class CSVToBinaryConverter:
         try:
             # 1. 检查流量数据 (Qout)
             if 'Qout' in chunk.columns:
-                chunk, qout_results = detect_and_handle_anomalies(
+                chunk, qout_results = check_qout_data(
                     chunk,
-                    columns_to_check=['Qout'],
-                    fix_negative=self.fix_anomalies,
-                    fix_outliers=self.fix_anomalies,
-                    fix_nan=self.fix_anomalies,
-                    negative_replacement=0.001,
-                    nan_replacement=0.001,
-                    outlier_method='iqr',
-                    outlier_threshold=4.0,
+                    fix_anomalies=self.fix_anomalies,
                     verbose=False,  # 批量处理时减少日志
-                    data_type='timeseries',
-                    logger=logging
+                    logger=logging,
+                    data_type='timeseries'
                 )
                 self._accumulate_check_results('Qout', qout_results)
             
             # 2. 检查输入特征
             available_input_features = [col for col in self.input_features if col in chunk.columns]
             if available_input_features:
-                chunk, input_results = detect_and_handle_anomalies(
+                chunk, input_results = check_input_features(
                     chunk,
-                    columns_to_check=available_input_features,
-                    check_negative=False,  # 输入特征可能为负
-                    fix_nan=self.fix_anomalies,
-                    negative_replacement=0.0,
-                    nan_replacement=0.0,
-                    outlier_method='iqr',
-                    outlier_threshold=6.0,
+                    input_features=available_input_features,
+                    fix_anomalies=self.fix_anomalies,
                     verbose=False,
-                    data_type='timeseries',
-                    logger=logging
+                    logger=logging,
+                    data_type='timeseries'
                 )
                 self._accumulate_check_results('input_features', input_results)
             
             # 3. 检查水质目标数据
             available_target_cols = [col for col in self.target_cols if col in chunk.columns]
             if available_target_cols:
-                chunk, target_results = detect_and_handle_anomalies(
+                chunk, target_results = check_target_data(
                     chunk,
-                    columns_to_check=available_target_cols,
-                    check_nan=False,  # 水质数据允许NaN
-                    fix_nan=False,   # 不自动填充水质NaN
-                    negative_replacement=0.001,
-                    outlier_method='iqr',
-                    outlier_threshold=6.0,
+                    target_cols=available_target_cols,
+                    fix_anomalies=False,  # 水质数据不自动填充
                     verbose=False,
-                    data_type='timeseries',
-                    logger=logging
+                    logger=logging,
+                    data_type='timeseries'
                 )
-                self._accumulate_check_results('target_cols', target_results)
+                self._accumulate_check_results('target_data', target_results)
             
         except Exception as e:
             logging.warning(f"数据块质量检查失败，使用原始数据: {e}")

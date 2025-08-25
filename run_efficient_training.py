@@ -33,10 +33,11 @@ project_root = Path(__file__).parent
 sys.path.append(str(project_root))
 
 # 导入高效无DataFrame模块
-from data_processing import load_daily_data, load_river_attributes, detect_and_handle_anomalies, check_river_network_consistency
-from model_training.iterative_train.iterative_training import iterative_training_procedure
-from logging_utils import setup_logging, ensure_dir_exists, restore_stdout_stderr
-from model_training.gpu_memory_utils import (
+from .data_processing import load_daily_data, load_river_attributes, check_river_network_consistency
+from .data_quality_checker import sample_based_data_quality_check
+from .model_training.iterative_train.iterative_training import iterative_training_procedure
+from .logging_utils import setup_logging, ensure_dir_exists, restore_stdout_stderr
+from .model_training.gpu_memory_utils import (
     log_memory_usage, 
     TimingAndMemoryContext, 
     MemoryTracker, 
@@ -45,7 +46,7 @@ from model_training.gpu_memory_utils import (
     set_memory_log_verbosity,
     force_cuda_memory_cleanup
 )
-from check_binary_compatibility import validate_binary_data_format
+from .check_binary_compatibility import validate_binary_data_format
 
 #============================================================================
 # 配置文件处理
@@ -347,112 +348,24 @@ def load_auxiliary_data(data_config: Dict[str, str],
             logging.warning(f"二进制数据抽样检查失败，跳过时间序列检查: {e}")
             sample_df = None
         
-        # 初始化检查结果
-        qout_results = {'has_anomalies': False}
-        input_results = {'has_anomalies': False} 
-        target_results = {'has_anomalies': False}
-        attr_results = {'has_anomalies': False}
+        # 使用统一的基于抽样的数据质量检查接口
+        sample_df, attr_df, quality_report = sample_based_data_quality_check(
+            sample_df=sample_df,
+            attr_df=attr_df,
+            input_features=input_features,
+            target_cols=all_target_cols,
+            attr_features=attr_features,
+            fix_anomalies=fix_anomalies,
+            verbose=True,
+            logger=logging,
+            exclude_comids=exclude_comids
+        )
         
-        # 1. 检查流量数据 (Qout) - 仅在有抽样数据时执行
-        if sample_df is not None and 'Qout' in sample_df.columns:
-            logging.info("1. 检查流量数据 (Qout) - 基于抽样...")
-            try:
-                sample_df_qout, qout_results = detect_and_handle_anomalies(
-                    sample_df, 
-                    columns_to_check=['Qout'], 
-                    fix_negative=fix_anomalies,
-                    fix_outliers=fix_anomalies,
-                    fix_nan=fix_anomalies,
-                    negative_replacement=0.001,
-                    nan_replacement=0.001,
-                    outlier_method='iqr',
-                    outlier_threshold=4,
-                    verbose=True,
-                    data_type='timeseries_sample',
-                    logger=logging,
-                    exclude_comids=exclude_comids
-                )
-            except Exception as e:
-                logging.warning(f"流量数据检查出错: {e}")
-        else:
-            logging.info("1. 跳过流量数据检查 (数据不可用)")
-        
-        # 2. 检查输入特征 - 仅在有抽样数据时执行
-        if sample_df is not None:
-            logging.info("2. 检查日尺度输入特征 - 基于抽样...")
-            available_input_features = [col for col in input_features if col in sample_df.columns]
-            if available_input_features:
-                try:
-                    sample_df_input, input_results = detect_and_handle_anomalies(
-                        sample_df,
-                        columns_to_check=available_input_features,
-                        check_negative=False,  # 输入特征可能为负，不应检查
-                        fix_nan=fix_anomalies,
-                        negative_replacement=0.0,  # 输入特征用0填充
-                        nan_replacement=0.0,  # 输入特征用0填充
-                        outlier_method='iqr',
-                        outlier_threshold=6.0,  # 使用更严格的阈值
-                        verbose=True,
-                        logger=logging,
-                        data_type='timeseries_sample',
-                        exclude_comids=exclude_comids,
-                    )
-                except Exception as e:
-                    logging.warning(f"输入特征检查出错: {e}")
-            else:
-                logging.warning("未找到可检查的输入特征列")
-        else:
-            logging.info("2. 跳过输入特征检查 (数据不可用)")
-        
-        # 3. 检查水质目标数据 - 仅在有抽样数据时执行
-        if sample_df is not None:
-            logging.info("3. 检查水质目标数据 - 基于抽样...")
-            available_target_cols = [col for col in all_target_cols if col in sample_df.columns]
-            if available_target_cols:
-                try:
-                    sample_df_target, target_results = detect_and_handle_anomalies(
-                        sample_df,
-                        columns_to_check=available_target_cols,
-                        check_nan=False,
-                        fix_nan=False,  # 水质数据不填充NaN
-                        negative_replacement=0.001,  # 水质数据最小值设为0.001
-                        outlier_method='iqr',
-                        outlier_threshold=6.0,
-                        verbose=True,
-                        data_type='timeseries_sample',
-                        logger=logging,
-                        exclude_comids=exclude_comids
-                    )
-                except Exception as e:
-                    logging.warning(f"水质目标数据检查出错: {e}")
-            else:
-                logging.warning("未找到可检查的水质目标列")
-        else:
-            logging.info("3. 跳过水质目标数据检查 (数据不可用)")
-        
-        # 4. 检查属性数据
-        logging.info("4. 检查河段属性数据...")
-        available_attr_features = [col for col in attr_features if col in attr_df.columns]
-        if available_attr_features:
-            try:
-                attr_df, attr_results = detect_and_handle_anomalies(
-                    attr_df,
-                    columns_to_check=available_attr_features,
-                    check_negative=False,
-                    fix_nan=fix_anomalies,
-                    negative_replacement=0.001,
-                    nan_replacement=0.001,
-                    outlier_method='iqr',
-                    outlier_threshold=4,
-                    verbose=True,
-                    logger=logging,
-                    data_type='attributes',
-                    exclude_comids=exclude_comids,
-                )
-            except Exception as e:
-                logging.warning(f"属性数据检查出错: {e}")
-        else:
-            logging.warning("未找到可检查的属性特征列")
+        # 提取检查结果（保持兼容性）
+        qout_results = quality_report.get('qout', {'has_anomalies': False})
+        input_results = quality_report.get('input_features', {'has_anomalies': False})
+        target_results = quality_report.get('target_data', {'has_anomalies': False})
+        attr_results = quality_report.get('attr_data', {'has_anomalies': False})
         
         # 5. 检查河网拓扑结构一致性
         with TimingAndMemoryContext("检查河网拓扑结构一致性"):

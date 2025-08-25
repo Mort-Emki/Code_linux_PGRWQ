@@ -17,7 +17,8 @@ import warnings
 # 导入已有的计算函数
 from ..core.geometry import get_river_length, calculate_river_width
 from ..physics.environment_param import compute_retainment_factor
-from ...data_processing import load_daily_data, load_river_attributes, detect_and_handle_anomalies
+from ...data_processing import load_daily_data, load_river_attributes
+from ...data_quality_checker import check_qout_data, check_input_features, check_attr_data
 
 
 def calculate_retention_coefficients_simplified(

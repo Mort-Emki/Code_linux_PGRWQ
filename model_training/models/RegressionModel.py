@@ -11,8 +11,8 @@ import numpy as np
 import logging
 import os
 import pickle
-from PGRWQI.model_training.models.models import CatchmentModel
-from PGRWQI.model_training.gpu_memory_utils import TimingAndMemoryContext
+from .models import CatchmentModel
+from ..gpu_memory_utils import TimingAndMemoryContext
 
 class RegressionModel(CatchmentModel):
     """

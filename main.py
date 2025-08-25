@@ -29,7 +29,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 logging.getLogger().setLevel(logging.DEBUG)
 
 # 导入自定义模块
-from .data_processing import load_daily_data, load_river_attributes, detect_and_handle_anomalies, check_river_network_consistency
+from .data_processing import load_daily_data, load_river_attributes, check_river_network_consistency
+from .data_quality_checker import check_qout_data
 from .model_training.iterative_train.iterative_training import iterative_training_procedure
 from .logging_utils import setup_logging, restore_stdout_stderr, ensure_dir_exists
 from .tqdm_logging import tqdm
@@ -234,13 +235,9 @@ def load_data(data_config: Dict[str, str]) -> Tuple[pd.DataFrame, pd.DataFrame, 
         
         # 检查异常值
         logging.info("检查数据中的异常值...")
-        df, anomaly_results = detect_and_handle_anomalies(
+        df, anomaly_results = check_qout_data(
             df, 
-            columns_to_check=['Qout'], 
-            fix_negative=True,
-            negative_replacement=0.001,
-            outlier_method='iqr',
-            outlier_threshold=3.0,
+            fix_anomalies=True,
             verbose=True,
             logger=logging
         )

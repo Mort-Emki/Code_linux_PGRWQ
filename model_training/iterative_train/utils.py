@@ -13,8 +13,8 @@ import time
 from typing import Dict, List, Tuple, Optional, Any, Callable
 from datetime import datetime
 
-from PGRWQI.model_training.gpu_memory_utils import TimingAndMemoryContext
-from PGRWQI.logging_utils import ensure_dir_exists
+from ..gpu_memory_utils import TimingAndMemoryContext
+from ...logging_utils import ensure_dir_exists
 
 
 def check_existing_flow_routing_results(

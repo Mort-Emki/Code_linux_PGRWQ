@@ -9,8 +9,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 import logging
-from PGRWQI.model_training.gpu_memory_utils import log_memory_usage, TimingAndMemoryContext 
-from PGRWQI.model_training.models.models import CatchmentModel
+from ..gpu_memory_utils import log_memory_usage, TimingAndMemoryContext 
+from .models import CatchmentModel
 
 # =============================================================================
 # 网络模型定义

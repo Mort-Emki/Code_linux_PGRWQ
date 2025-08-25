@@ -30,15 +30,15 @@ project_root = Path(__file__).parent
 sys.path.append(str(project_root))
 
 # 导入高效无DataFrame模块
-from data_processing import load_daily_data, load_river_attributes
-from model_training.iterative_train.iterative_training import iterative_training_procedure
-from model_training.gpu_memory_utils import (
+from .data_processing import load_daily_data, load_river_attributes
+from .model_training.iterative_train.iterative_training import iterative_training_procedure
+from .model_training.gpu_memory_utils import (
     log_memory_usage, 
     MemoryTracker,
     force_cuda_memory_cleanup
 )
-from logging_utils import ensure_dir_exists
-from check_binary_compatibility import validate_binary_data_format
+from .logging_utils import ensure_dir_exists
+from .check_binary_compatibility import validate_binary_data_format
 
 
 def setup_logging(log_level='INFO'):
@@ -352,7 +352,7 @@ def main():
     
     # 检查二进制数据格式
     try:
-        from check_binary_compatibility import check_data_compatibility
+        from .check_binary_compatibility import check_data_compatibility
         compatibility_result = check_data_compatibility(args.binary_dir)
         
         if not compatibility_result['compatible']:
